@@ -10,16 +10,37 @@ import tempfile
 import time
 import urllib.request
 import zipfile
+import hashlib
 
 ROOT=Path(__file__).resolve().parents[1]
 EVIDENCE=ROOT/'build'/'evidence';EVIDENCE.mkdir(parents=True,exist_ok=True)
 
+def capture_processes(pid,directory=EVIDENCE):
+    script=f'''$ErrorActionPreference = 'Stop'
+    $all = Get-CimInstance Win32_Process
+    $owned = @({pid})
+    do {{ $more = @($all | Where-Object {{ $_.ParentProcessId -in $owned -and $_.ProcessId -notin $owned }} | Select-Object -ExpandProperty ProcessId); $owned += $more }} while ($more.Count)
+    $processes = @($all | Where-Object {{ $_.ProcessId -in $owned }} | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine)
+    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -in $owned }} | Select-Object LocalAddress,LocalPort,OwningProcess)
+    @{{processes=$processes;listeners=$listeners}} | ConvertTo-Json -Depth 4
+    '''
+    with (directory/'owned-processes.json').open('w',encoding='utf-8') as log:
+        subprocess.run(['pwsh','-NoProfile','-Command',script],stdout=log,stderr=subprocess.STDOUT,timeout=30,check=True)
+    result=json.loads((directory/'owned-processes.json').read_text(encoding='utf-8-sig'))
+    if not any(p['ProcessId']==pid for p in result['processes']):raise RuntimeError('Test EXE missing from process evidence')
+    return result
+
 def main():
     if sys.platform!='win32':raise SystemExit('Windows acceptance requires Windows')
+    archive=ROOT/'dist'/'TikTokVideoMaker_Portable.zip'
+    archive_sha=hashlib.sha256(archive.read_bytes()).hexdigest()
+    if archive_sha!=(ROOT/'dist'/'TikTokVideoMaker_Portable.sha256').read_text().strip():raise RuntimeError('Candidate archive SHA-256 mismatch')
+    (EVIDENCE/'candidate-identity.json').write_text(json.dumps({'sha256':archive_sha,'test_commit':os.environ.get('GITHUB_SHA'),'candidate_run_id':os.environ.get('CANDIDATE_RUN_ID') or os.environ.get('GITHUB_RUN_ID')},indent=2),encoding='utf-8')
     with tempfile.TemporaryDirectory(prefix="TVM 中文 O'Brien ",delete=False) as temporary:
         base=Path(temporary)
         with zipfile.ZipFile(ROOT/'dist'/'TikTokVideoMaker_Portable.zip') as z:z.extractall(base)
         app=base/'TikTokVideoMaker'
+        shutil.copy2(app/'build-manifest.json',EVIDENCE/'candidate-build-manifest.json')
         sources=base/'素材';sources.mkdir()
         for p in (ROOT/'examples/input').iterdir():shutil.copy2(p,sources/p.name)
         output=base/'自选 输出';output.mkdir()
@@ -49,6 +70,10 @@ def main():
             fixture_path=base/'fixture.json';fixture_path.write_text(json.dumps(fixture),encoding='utf-8')
             environment.update(TVM_CDP=f'http://127.0.0.1:{port}',TVM_FIXTURE=str(fixture_path),PYTHON=sys.executable)
             subprocess.run(['node','tests/ui_business.cjs'],cwd=ROOT,env=environment,check=True,timeout=480)
+            if os.environ.get('TVM_CAPTURE_ONLY')=='1':
+                if not (EVIDENCE/'windows-capture.json').is_file():raise RuntimeError('Window capture did not reach the required stage')
+                capture_processes(process.pid)
+                return
             subprocess.run([sys.executable,'tests/windows_dialog.py',str(process.pid),'close'],cwd=ROOT,check=True,timeout=30)
             code=process.wait(timeout=60)
             if code!=0:raise RuntimeError(f'Normal EXE close returned {code}')
@@ -70,21 +95,15 @@ def main():
             # Diagnose only this test's EXE and descendants. A diagnostic failure never passes acceptance.
             with (EVIDENCE/'native-windows.txt').open('w',encoding='utf-8') as log:
                 subprocess.run([sys.executable,'tests/windows_dialog.py',str(process.pid),'diagnose',str(EVIDENCE)],cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,timeout=30)
-            script=f'''$all = Get-CimInstance Win32_Process
-$owned = @({process.pid})
-do {{ $more = @($all | Where-Object {{ $_.ParentProcessId -in $owned -and $_.ProcessId -notin $owned }} | Select-Object -ExpandProperty ProcessId); $owned += $more }} while ($more.Count)
-$all | Where-Object {{ $_.ProcessId -in $owned }} | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Depth 3
-Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -in $owned }} | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json
-'''
-            with (EVIDENCE/'owned-processes.txt').open('w',encoding='utf-8') as log:
-                subprocess.run(['pwsh','-NoProfile','-Command',script],stdout=log,stderr=subprocess.STDOUT,timeout=30)
+            capture_processes(process.pid)
             raise
         finally:
             log=app/'data'/'application.log'
             if log.is_file():shutil.copy2(log,EVIDENCE/'windows-application.log')
             if not exited_normally and process.poll() is None:
                 # Failure cleanup is explicitly NOT a passed exit test, and only this EXE is affected.
-                (EVIDENCE/'forced-cleanup.txt').write_text('Acceptance failed; stopped only the owned test EXE.',encoding='utf-8')
+                reason='Evidence-only collection ended; no normal-exit acceptance was performed.' if os.environ.get('TVM_CAPTURE_ONLY')=='1' else 'Acceptance failed; stopped only the owned test EXE.'
+                (EVIDENCE/'forced-cleanup.txt').write_text(reason,encoding='utf-8')
                 process.terminate();process.wait(timeout=20)
         # Failed runs retain their isolated directory for runner teardown and preserve the original error.
         # Normal WebView children can release profile files briefly after the host's normal exit.

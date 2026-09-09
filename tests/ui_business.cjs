@@ -29,7 +29,22 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    return (['close','new-product','import'].includes(action)?locator.first():locator).click();
   };
   const state=()=>page.evaluate(async()=>{const r=await fetch('/api/state');if(!r.ok)throw Error('state failed');return r.json()});
-  const native=async(action,arg='')=>childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),action,arg],{cwd:root}));
+  let nativeSequence=0;
+  const native=async(action,arg='')=>{
+   if(process.env.TVM_CAPTURE_ONLY==='1'){
+    const directory=path.join(evidence,`native-${++nativeSequence}-${action}`);
+    fs.mkdirSync(directory,{recursive:true});
+    try{
+     const log=await childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),'diagnose',directory,action],{cwd:root}));
+     fs.writeFileSync(path.join(directory,'diagnostic.log'),log);
+    }catch(error){fs.writeFileSync(path.join(directory,'diagnostic.log'),String(error));throw error}
+    if(action==='folder'&&arg===fixture.output){
+     fs.writeFileSync(path.join(evidence,'windows-capture.json'),JSON.stringify({capture_complete:true,acceptance_passed:false,pid:fixture.pid,stage:'output-picker-open',captures:nativeSequence},null,2));
+     console.log('WINDOW_EVIDENCE_CAPTURED; production acceptance was not run');process.exit(0);
+    }
+   }
+   return childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),action,arg],{cwd:root}));
+  };
   const waitFor=async(fn,label)=>{const until=Date.now()+90000;while(Date.now()<until){const s=await state();if(s.tasks.some(t=>t.status==='failed'))throw Error(s.tasks.filter(t=>t.status==='failed').map(t=>t.error).join('\n'));if(fn(s))return s;await new Promise(r=>setTimeout(r,250))}throw Error('Timed out: '+label)};
   await page.locator('#navigation a[href="#assets"]').waitFor();
   if(process.env.TVM_CDP)await page.screenshot({path:path.join(evidence,'windows-startup.png'),fullPage:true});

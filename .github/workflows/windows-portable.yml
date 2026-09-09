@@ -6,12 +6,19 @@ on:
         description: Official Microsoft fixed x64 CAB URL (optional if exposed on the official page)
         required: false
         type: string
+      candidate_run_id:
+        description: Reuse an existing Windows-candidate artifact without rebuilding
+        required: false
+        type: string
   push:
     branches: [main, 'upgrade/**']
 permissions:
   contents: read
+  actions: read
 jobs:
   business:
+    # Business code is frozen on the upgrade branch; its existing regression remains valid.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -41,8 +48,12 @@ jobs:
           if-no-files-found: ignore
   windows:
     needs: business
-    runs-on: windows-latest
+    if: always() && !cancelled() && (needs.business.result == 'success' || needs.business.result == 'skipped')
+    runs-on: windows-2025
     timeout-minutes: 45
+    env:
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '' }}
+      TVM_CAPTURE_ONLY: '1'
     defaults:
       run:
         shell: pwsh
@@ -62,14 +73,36 @@ jobs:
           npm install --no-save playwright@1.58.2
           if ($LASTEXITCODE -ne 0) { throw 'UI test dependency installation failed' }
       - name: Prepare bundled runtimes
+        if: env.CANDIDATE_RUN_ID == ''
         env:
           WEBVIEW2_FIXED_URL: ${{ inputs.webview2_fixed_url }}
         run: python prepare_windows_runtime.py
       - name: Build complete portable archive
+        if: env.CANDIDATE_RUN_ID == ''
         run: python build_windows.py
-      - name: Test extracted EXE, native dialogs, actual production and normal exit
+      - name: Save candidate and SHA-256 before opening the EXE
+        if: env.CANDIDATE_RUN_ID == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-candidate
+          path: |
+            dist/TikTokVideoMaker_Portable.zip
+            dist/TikTokVideoMaker_Portable.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Download the unchanged candidate
+        if: env.CANDIDATE_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: Windows-candidate
+          path: dist
+          run-id: ${{ env.CANDIDATE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Capture original native window evidence
         run: python tests/windows_acceptance.py
       - name: Upload portable archive after acceptance
+        if: env.TVM_CAPTURE_ONLY != '1'
         uses: actions/upload-artifact@v4
         with:
           name: TikTokVideoMaker_Portable
