@@ -16,7 +16,7 @@ EVIDENCE=ROOT/'build'/'evidence';EVIDENCE.mkdir(parents=True,exist_ok=True)
 
 def main():
     if sys.platform!='win32':raise SystemExit('Windows acceptance requires Windows')
-    with tempfile.TemporaryDirectory(prefix="TVM 中文 O'Brien ") as temporary:
+    with tempfile.TemporaryDirectory(prefix="TVM 中文 O'Brien ",delete=False) as temporary:
         base=Path(temporary)
         with zipfile.ZipFile(ROOT/'dist'/'TikTokVideoMaker_Portable.zip') as z:z.extractall(base)
         app=base/'TikTokVideoMaker'
@@ -64,6 +64,19 @@ def main():
             if process.wait(timeout=60)!=0:raise RuntimeError('Restarted EXE did not exit normally')
             exited_normally=True
             (EVIDENCE/'windows-acceptance.json').write_text(json.dumps({'passed':True,'platform':sys.getwindowsversion().build,'normal_exit':True,'restart':True,'real_videos':count,'source_commit':os.environ.get('GITHUB_SHA'),'external_platforms':'not_connected'},indent=2),encoding='utf-8')
+        except Exception:
+            # Diagnose only this test's EXE and descendants. A diagnostic failure never passes acceptance.
+            with (EVIDENCE/'native-windows.txt').open('w',encoding='utf-8') as log:
+                subprocess.run([sys.executable,'tests/windows_dialog.py',str(process.pid),'diagnose',str(EVIDENCE)],cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,timeout=30)
+            script=f'''$all = Get-CimInstance Win32_Process
+$owned = @({process.pid})
+do {{ $more = @($all | Where-Object {{ $_.ParentProcessId -in $owned -and $_.ProcessId -notin $owned }} | Select-Object -ExpandProperty ProcessId); $owned += $more }} while ($more.Count)
+$all | Where-Object {{ $_.ProcessId -in $owned }} | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Depth 3
+Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -in $owned }} | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json
+'''
+            with (EVIDENCE/'owned-processes.txt').open('w',encoding='utf-8') as log:
+                subprocess.run(['pwsh','-NoProfile','-Command',script],stdout=log,stderr=subprocess.STDOUT,timeout=30)
+            raise
         finally:
             log=app/'data'/'application.log'
             if log.is_file():shutil.copy2(log,EVIDENCE/'windows-application.log')
@@ -71,5 +84,12 @@ def main():
                 # Failure cleanup is explicitly NOT a passed exit test, and only this EXE is affected.
                 (EVIDENCE/'forced-cleanup.txt').write_text('Acceptance failed; stopped only the owned test EXE.',encoding='utf-8')
                 process.terminate();process.wait(timeout=20)
+        # Failed runs retain their isolated directory for runner teardown and preserve the original error.
+        # Normal WebView children can release profile files briefly after the host's normal exit.
+        for attempt in range(20):
+            try:shutil.rmtree(base);break
+            except PermissionError:
+                if attempt==19:raise
+                time.sleep(.2)
 
 if __name__=='__main__':main()
