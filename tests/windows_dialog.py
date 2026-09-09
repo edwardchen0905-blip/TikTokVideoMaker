@@ -21,10 +21,8 @@ else:
     dialog.wait('visible',timeout=20)
     if action=='cancel':dialog.child_window(auto_id='2',control_type='Button').invoke()
     else:
-        edit=dialog.child_window(auto_id='1148',control_type='Edit')
-        if not edit.exists(timeout=1):
-            combo=dialog.child_window(auto_id='1148',control_type='ComboBox')
-            edit=combo.child_window(control_type='Edit')
+        # Actual captured dialogs: Open uses 1148; Select Folder uses 1152.
+        edit=dialog.child_window(auto_id='1152' if action=='folder' else '1148',control_type='Edit')
         edit.set_edit_text(value)
         dialog.child_window(auto_id='1',control_type='Button').invoke()
     dialog.wait_not('visible',timeout=20)
