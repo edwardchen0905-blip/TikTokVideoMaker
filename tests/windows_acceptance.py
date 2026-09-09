@@ -11,6 +11,7 @@ import time
 import urllib.request
 import zipfile
 import hashlib
+from contextlib import closing
 
 ROOT=Path(__file__).resolve().parents[1]
 EVIDENCE=ROOT/'build'/'evidence';EVIDENCE.mkdir(parents=True,exist_ok=True)
@@ -109,7 +110,7 @@ def main():
             close_normally(process,app,port,'first')
             exited_normally=True
             import sqlite3
-            with sqlite3.connect(app/'data'/'workspace.sqlite3') as db:
+            with closing(sqlite3.connect(app/'data'/'workspace.sqlite3')) as db:
                 count=db.execute('SELECT COUNT(*) FROM videos').fetchone()[0]
                 if count!=4:raise RuntimeError('Expected four actual rendered videos')
             # Restart the same EXE and verify persisted records through its original page.
@@ -121,7 +122,6 @@ def main():
             close_normally(process,app,port,'restart')
             exited_normally=True
             if hashlib.sha256(archive.read_bytes()).hexdigest()!=archive_sha:raise RuntimeError('Candidate archive changed during acceptance')
-            (EVIDENCE/'windows-acceptance.json').write_text(json.dumps({'passed':True,'platform':sys.getwindowsversion().build,'normal_exit':True,'restart':True,'real_videos':count,'test_commit':os.environ.get('GITHUB_SHA'),'candidate_sha256':archive_sha,'candidate_run_id':os.environ.get('CANDIDATE_RUN_ID'),'external_platforms':'not_connected'},indent=2),encoding='utf-8')
         except Exception as original_error:
             record_stage('failed',error=repr(original_error))
             # Diagnose only this test's EXE and descendants. A diagnostic failure never passes acceptance.
@@ -147,5 +147,6 @@ def main():
             except PermissionError:
                 if attempt==19:raise
                 time.sleep(.2)
+        (EVIDENCE/'windows-acceptance.json').write_text(json.dumps({'passed':True,'platform':sys.getwindowsversion().build,'normal_exit':True,'restart':True,'test_cleanup':True,'real_videos':count,'test_commit':os.environ.get('GITHUB_SHA'),'candidate_sha256':archive_sha,'candidate_run_id':os.environ.get('CANDIDATE_RUN_ID'),'external_platforms':'not_connected'},indent=2),encoding='utf-8')
 
 if __name__=='__main__':main()
