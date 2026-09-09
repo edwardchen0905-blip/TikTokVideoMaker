@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+data/
+build/
+dist/
+runtime/
+*.spec
+node_modules/
+package-lock.json

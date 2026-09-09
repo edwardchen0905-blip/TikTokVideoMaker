@@ -1,0 +1,88 @@
+name: Validate and build Windows portable
+on:
+  workflow_dispatch:
+    inputs:
+      webview2_fixed_url:
+        description: Official Microsoft fixed x64 CAB URL (optional if exposed on the official page)
+        required: false
+        type: string
+  push:
+    branches: [main, 'upgrade/**']
+permissions:
+  contents: read
+jobs:
+  business:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare test-only tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          npm install --no-save playwright@1.58.2
+          npx playwright install --with-deps chromium
+      - name: Real backend and UI regression
+        run: |
+          python -m unittest discover -s tests -v
+          node tests/check_ui.cjs
+          node tests/ui_business.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Linux-business-evidence
+          path: build/evidence
+          if-no-files-found: ignore
+  windows:
+    needs: business
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare build and test tools
+        run: |
+          python -m pip install -r requirements.txt 'pyinstaller>=6,<7' pywinauto
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          npm install --no-save playwright@1.58.2
+          if ($LASTEXITCODE -ne 0) { throw 'UI test dependency installation failed' }
+      - name: Prepare bundled runtimes
+        env:
+          WEBVIEW2_FIXED_URL: ${{ inputs.webview2_fixed_url }}
+        run: python prepare_windows_runtime.py
+      - name: Build complete portable archive
+        run: python build_windows.py
+      - name: Test extracted EXE, native dialogs, actual production and normal exit
+        run: python tests/windows_acceptance.py
+      - name: Upload portable archive after acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: TikTokVideoMaker_Portable
+          path: dist/TikTokVideoMaker_Portable.zip
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload Windows evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-evidence
+          path: |
+            runtime/build-inputs.json
+            build/evidence
+            build/TikTokVideoMaker/warn-TikTokVideoMaker.txt
+          if-no-files-found: ignore
