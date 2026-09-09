@@ -25,11 +25,13 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    browser=await chromium.launch({headless:true,args:['--no-sandbox']});page=await browser.newPage({viewport:{width:1440,height:1000}});await page.goto(fixture.url);
   }
   page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
-  const click=action=>{
-   const locator=page.locator(`[data-action="${action}"]`);
-   // These are intentional duplicate entry points: thumbnail/details and header/empty state.
+  const click=async action=>{
+   const scope=await page.locator('#dialog').isVisible()?page.locator('#dialog[open]'):page.locator('#page');
+   if(action==='close')return scope.getByRole('button',{name:'关闭对话框',exact:true}).click();
+   // Choose the explicit page header entry where an empty-state shortcut also exists.
+   const locator=scope.locator(`${['new-product','import'].includes(action)?'.page-heading ':''}[data-action="${action}"]`);
    if(action.startsWith('focus-video:'))return locator.filter({hasText:'查看'}).click();
-   return (['close','new-product','import'].includes(action)?locator.first():locator).click();
+   return locator.click();
   };
   const state=()=>page.evaluate(async()=>{const r=await fetch('/api/state');if(!r.ok)throw Error('state failed');return r.json()});
   let nativeSequence=0;
@@ -118,6 +120,17 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    recordStage('output-directory-selected',{path:fixture.output});
   }
   else await page.locator('#batch-output').evaluate((e,p)=>{e.value=p},fixture.output);
+  const batchPreviewResponse=page.waitForResponse(r=>r.url().endsWith('/api/transition-preview')&&r.request().method()==='POST');
+  await click('preview-transition:slideleft');
+  const previewResponse=await batchPreviewResponse;assert.equal(previewResponse.ok(),true);
+  const previewResult=await previewResponse.json();
+  assert.equal(previewResult.config.resolution,'1080x1920');assert.equal(previewResult.config.transition_duration,.1);
+  assert.deepEqual(previewResult.config.transitions,['slideleft']);
+  assert.equal(await page.locator('#dialog[open] #batch-source').isVisible(),true,'Task dialog must remain open during its preview');
+  await page.locator('#dialog[open] #batch-transition-preview video').evaluate(v=>v.play());
+  await page.waitForFunction(()=>document.querySelector('#dialog[open] #batch-transition-preview video')?.currentTime>0);
+  await page.locator('#dialog[open] #batch-transition-preview video').evaluate(v=>v.pause());
+  recordStage('batch-transition-preview-played',{resolution:previewResult.config.resolution,transition_duration:previewResult.config.transition_duration});
   await click('preview-batch');await page.locator('#batch-preview').filter({hasText:'2.300'}).waitFor();
   await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});
   let s=await waitFor(s=>s.videos.length===2,'two actual local videos');
@@ -137,9 +150,9 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   assert.ok(s.tasks.every(t=>fs.realpathSync.native(JSON.parse(t.config).output_dir)===fs.realpathSync.native(fixture.output)));
   recordStage('local-videos-produced',{videos:s.videos.map(v=>v.id)});
   await page.locator('a[href="#videos"]').first().click();await click('focus-video:'+s.videos[0].id);
-  await page.locator('video').waitFor();await page.locator('video').evaluate(v=>v.play());
-  await page.waitForFunction(()=>document.querySelector('video')?.currentTime>0);
-  await page.locator('video').evaluate(v=>v.pause());
+  await page.locator('#page video').waitFor();await page.locator('#page video').evaluate(v=>v.play());
+  await page.waitForFunction(()=>document.querySelector('#page video')?.currentTime>0);
+  await page.locator('#page video').evaluate(v=>v.pause());
   await click('edit-copy:'+s.videos[0].id);await page.fill('#copy-caption','真实商品说明');await page.fill('#copy-tags','#商品');await click('save-copy:'+s.videos[0].id);
   await page.locator('#dialog').waitFor({state:'hidden'});assert.equal(JSON.parse((await state()).videos[0].content).caption,'真实商品说明');
   await page.locator(`[data-select="video"][value="${s.videos[0].id}"]`).check();
@@ -210,10 +223,10 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   assert.deepEqual(effects.map(e=>e.id),['none','fade','dissolve','slideleft','slideright','slideup','slidedown','coverleft','zoomsafe']);
   for(const effect of effects){
    await click('preview-transition:'+effect.id);
-   await page.locator('#dialog video').waitFor();
-   await page.locator('#dialog video').evaluate(v=>{v.currentTime=0;return v.play()});
-   await page.waitForFunction(()=>document.querySelector('#dialog video')?.currentTime>0);
-   await page.locator('#dialog video').evaluate(v=>v.pause());
+   await page.locator('#dialog[open] video').waitFor();
+   await page.locator('#dialog[open] video').evaluate(v=>{v.currentTime=0;return v.play()});
+   await page.waitForFunction(()=>document.querySelector('#dialog[open] video')?.currentTime>0);
+   await page.locator('#dialog[open] video').evaluate(v=>v.pause());
    assert.match(await page.locator('#dialog-content').innerText(),new RegExp(effect.name));
    await click('close');
   }
@@ -246,8 +259,8 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   if(process.env.TVM_CDP){
    await page.locator('#navigation a[href="#videos"]').click();
    for(const video of s.videos){
-    await click('focus-video:'+video.id);await page.locator('video').evaluate(v=>{v.currentTime=0;return v.play()});
-    await page.waitForFunction(()=>document.querySelector('video')?.currentTime>0);await page.locator('video').evaluate(v=>v.pause());
+    await click('focus-video:'+video.id);await page.locator('#page video').evaluate(v=>{v.currentTime=0;return v.play()});
+    await page.waitForFunction(()=>document.querySelector('#page video')?.currentTime>0);await page.locator('#page video').evaluate(v=>v.pause());
    }
    await page.screenshot({path:path.join(evidence,'all-videos-verified.png'),fullPage:true});
    const keys=['products','assets','skus','links','tasks','videos','publications','local_records','transitions','resolution_options','settings'];
