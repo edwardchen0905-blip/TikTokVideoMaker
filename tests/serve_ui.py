@@ -15,6 +15,6 @@ with tempfile.TemporaryDirectory(prefix='tvm_ui_') as tmp:
     imported=workspace.import_assets(list(source.iterdir()))
     assert not imported['errors'], imported
     service=DesktopService(workspace);service.start()
-    print(json.dumps({'url':service.url,'output':str(root/'external output')}),flush=True)
+    print(json.dumps({'url':service.url,'output':str(root/'external output'),'local_records':json.loads((repo/'tests/local_fixture.json').read_text(encoding='utf-8'))}),flush=True)
     try:sys.stdin.readline()
     finally:service.close()

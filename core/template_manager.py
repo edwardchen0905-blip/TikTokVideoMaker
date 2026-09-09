@@ -42,6 +42,9 @@ class TemplateManager:
         if not math.isfinite(volume) or not 0<=volume<=1:raise ValueError('音量必须介于 0 和 1')
         data['transition_duration']=round(transition*30)/30 if data['transition']!='none' else 0
         data['music_volume']=volume
+        tags=data.get('tags',[])
+        if not isinstance(tags,list) or any(not isinstance(t,str) or len(t)>100 for t in tags):raise ValueError('模板标签必须为文本列表')
+        data['tags']=list(dict.fromkeys(t.strip() for t in tags if t.strip()))
         data.setdefault('version',1)
         return data
 

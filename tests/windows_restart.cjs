@@ -7,5 +7,7 @@ const {chromium}=require('playwright'),assert=require('node:assert/strict');
  assert.ok(p);await p.locator('#navigation a[href="#assets"]').waitFor();
  const s=await p.evaluate(async()=>{const r=await fetch('/api/state');return r.json()});
  assert.equal(s.videos.length,4);assert.ok(s.tasks.every(t=>t.status==='done'));assert.equal(s.publications[0].status,'pending');
+ assert.ok(s.local_records.some(r=>r.key==='验收音乐规则'));assert.equal(s.local_records.filter(r=>r.kind==='text').length,6);
+ assert.ok(s.tasks.some(t=>JSON.parse(t.config).text_trace.language==='en'));assert.ok(s.tasks.some(t=>JSON.parse(t.config).text_trace.language==='th'));
  console.log('ORIGINAL_EXE_RESTART_PASSED');process.exit(0);
 })().catch(e=>{console.error(e);process.exit(1)});

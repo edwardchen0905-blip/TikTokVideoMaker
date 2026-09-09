@@ -56,7 +56,7 @@ class UpgradeTests(unittest.TestCase):
         state=self.finish();self.assertEqual(len(state['videos']),2)
         for v in state['videos']:
             task=next(t for t in state['tasks'] if t['id']==v['task_id']);cfg=json.loads(task['config'])
-            self.assertEqual(Path(v['path']).parent,self.output)
+            self.assertTrue(Path(v['path']).parent.samefile(self.output))
             self.assertTrue(json.loads(v['validation'])['full_decode'])
             # Confirm the actual encoded soundtrack matches the assigned track, not just a DB id.
             raw=subprocess.run(['ffmpeg','-v','error','-i',v['path'],'-t','0.2','-ar','8000','-ac','1','-f','f32le','-'],check=True,capture_output=True).stdout
@@ -68,7 +68,7 @@ class UpgradeTests(unittest.TestCase):
         self.w.save_settings({'output_dir':str(self.root/'different'),'music':'ai'})
         new=self.w.regenerate(old['id']);state=self.finish()
         self.assertEqual(next(t['config'] for t in state['tasks'] if t['id']==new),old_cfg)
-        self.assertEqual(Path(next(v['path'] for v in state['videos'] if v['task_id']==new)).parent,self.output)
+        self.assertTrue(Path(next(v['path'] for v in state['videos'] if v['task_id']==new)).parent.samefile(self.output))
         reopened=Workspace(self.w.root).snapshot()
         self.assertEqual(len(reopened['videos']),3)
         self.assertEqual(reopened['videos'][0]['task_id'],new)

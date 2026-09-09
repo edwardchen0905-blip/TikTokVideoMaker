@@ -15,6 +15,7 @@ import random
 import tempfile
 from datetime import datetime
 from core.template_manager import TemplateManager, seconds
+from core import local_content
 
 KINDS = {'.png':'image','.jpg':'image','.jpeg':'image','.webp':'image','.mp4':'video','.mov':'video','.mkv':'video','.webm':'video','.mp3':'music','.wav':'music','.m4a':'music','.aac':'music','.flac':'music'}
 
@@ -68,6 +69,12 @@ class Workspace:
             if 'content' not in {r['name'] for r in db.execute('PRAGMA table_info(publications)')}:
                 db.execute("ALTER TABLE publications ADD COLUMN content TEXT NOT NULL DEFAULT '{}'")
             db.execute('CREATE TABLE IF NOT EXISTS user_templates(id TEXT PRIMARY KEY,config TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS local_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,key TEXT NOT NULL,language TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,UNIQUE(kind,key,language))')
+            for r in local_content.builtins():
+                r=local_content.validate(r)
+                db.execute('INSERT OR IGNORE INTO local_records(id,kind,key,language,config,version) VALUES(?,?,?,?,?,1)',(r['id'],r['kind'],local_content.norm(r['key']),r['language'],json.dumps(r)))
+            if 'metadata' not in {r['name'] for r in db.execute('PRAGMA table_info(products)')}:
+                db.execute("ALTER TABLE products ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
         self.worker = None
         self.stopping = threading.Event()
 
@@ -88,11 +95,16 @@ class Workspace:
         allowed={'source','template','duration','music','music_ids','music_order','cacheDays','density','output_dir','download_retention','output_retention','production'}
         if set(values)-allowed: raise ValueError('设置字段无效')
         if str(values.get('cacheDays','7')) not in {'0','1','7','30'}: raise ValueError('缓存保留时间无效')
-        if values.get('music','none') not in {'none','ai','single','multi'}:raise ValueError('音乐模式无效；AI 选曲等待接入')
+        if values.get('music','local') not in {'none','local','ai','single','multi'}:raise ValueError('音乐模式无效；AI 选曲等待接入')
         if values.get('download_retention','keep') not in {'keep','after_tasks'}:raise ValueError('下载保留策略无效')
         if values.get('output_retention','keep') not in {'keep','after_uploaded','after_published'}:raise ValueError('输出保留策略无效')
         if values.get('output_dir'):values['output_dir']=str(self.check_output_dir(values['output_dir']))
         with self.connection() as db:
+            stored=db.execute("SELECT value FROM settings WHERE key='production'").fetchone()
+            production=dict(values.get('production',json.loads(stored[0]) if stored else {}))
+            for key in ('music','music_ids','music_order','output_dir'):
+                if key in values:production[key]=values[key]
+            if production:values=dict(values,production=production)
             for k,v in values.items(): db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(k,json.dumps(v)))
         return self.snapshot()['settings']
 
@@ -112,7 +124,13 @@ class Workspace:
             existing=db.execute('SELECT id FROM products WHERE id=?',(pid,)).fetchone()
             if existing:
                 db.execute('UPDATE products SET title=?,store=?,url=? WHERE id=?',(title,str(p.get('store','')),str(p.get('url','')),pid))
-            else: db.execute('INSERT INTO products VALUES(?,?,?,?,?)',(pid,title,str(p.get('store','')),str(p.get('url','')),now()))
+            else: db.execute('INSERT INTO products(id,title,store,url,created) VALUES(?,?,?,?,?)',(pid,title,str(p.get('store','')),str(p.get('url','')),now()))
+            old=json.loads(db.execute('SELECT metadata FROM products WHERE id=?',(pid,)).fetchone()[0])
+            for field in ('details','category','keywords','video_titles'):
+                if field in p:
+                    if not isinstance(p[field],str) or len(p[field])>20000:raise ValueError('商品资料格式无效或过长')
+                    old[field]=p[field]
+            db.execute('UPDATE products SET metadata=? WHERE id=?',(json.dumps(old),pid))
             for name,source_id in dict.fromkeys(skus):
                 db.execute('INSERT INTO skus(id,product_id,name,source_id) VALUES(?,?,?,?) ON CONFLICT(product_id,name) DO UPDATE SET source_id=COALESCE(excluded.source_id,skus.source_id)',(uid(),pid,name,source_id))
         return pid
@@ -252,7 +270,7 @@ class Workspace:
         mode=payload.get('music','none')
         if mode in {'ai','auto'}:raise ValueError('AI 自动选曲和音乐源等待接入，未执行选曲')
         if mode=='selected':mode='single'  # Preserve existing single-song callers; never emulate AI.
-        if mode not in {'none','single','multi'}:raise ValueError('音乐模式无效')
+        if mode not in {'none','local','single','multi'}:raise ValueError('音乐模式无效')
         pool=list(dict.fromkeys(payload.get('music_ids') or ([payload['music_id']] if payload.get('music_id') else [])))
         if mode=='none':pool=[]
         if mode=='single' and len(pool)!=1:raise ValueError('指定单曲需要选择一首音乐')
@@ -262,9 +280,11 @@ class Workspace:
         rng=random.Random(payload.get('seed'))
         defaults=self.snapshot()['settings']
         output_dir=self.check_output_dir(payload.get('output_dir') or defaults.get('output_dir'))
-        batch=uid();jobs=[];previews=[];previous_music=None
+        batch=uid();jobs=[];previews=[];rotation={}
+        records=self.local_records()
         with self.connection() as db:
             music_rows={}
+            if mode=='local':pool=[r['id'] for r in db.execute("SELECT id FROM assets WHERE kind='music' AND deleted=0") if self.asset_path(r['id']).is_file()]
             for mid in pool:
                 r=db.execute("SELECT * FROM assets WHERE id=? AND kind='music'",(mid,)).fetchone()
                 if not r or r['deleted'] or not self.asset_path(mid).is_file():raise ValueError('音乐素材缺失')
@@ -316,10 +336,25 @@ class Workspace:
                     cfg['durations']=durations;cfg['timing']=timing;cfg['expected_duration']=sum(durations)-(len(durations)-1)*transition
                     if timing=='total' and abs(cfg['expected_duration']-total)>.1:raise ValueError('素材数与30fps无法满足指定总时长，请改用逐图时长')
                     cfg['output_dir']=str(output_dir)
+                    actual_products=[dict(db.execute('SELECT * FROM products WHERE id=?',(p,)).fetchone()) for p in origins]
+                    for p in actual_products:p.update(json.loads(p['metadata']))
+                    actual_skus=[dict(r) for p in origins for r in db.execute('SELECT * FROM skus WHERE product_id=? AND (? IS NULL OR id=?)',(p,sid,sid))]
+                    asset_info=[dict(db.execute('SELECT * FROM assets WHERE id=?',(a,)).fetchone()) for a in ordered]
+                    copy_options=payload.get('local_copy',{'mode':'local','language':'th','sources':[]})
+                    if copy_options.get('mode','local')!='manual':
+                        prior=[json.loads(v['content']).get('title','') for v in db.execute('SELECT content FROM videos')]
+                        prior.extend(p.get('video_titles','') for p in actual_products)
+                        generated,cfg['text_trace']=local_content.compose(records,actual_products,actual_skus,asset_info,copy_options,prior,len(jobs),rng,rotation)
+                        cfg['local_copy']=copy_options
+                    else:generated={}
                     cfg['music_mode']=mode;cfg['music_id']=None
-                    if pool:
-                        chosen=rng.choice([m for m in pool if m!=previous_music] or pool) if music_order=='random' else pool[len(jobs)%len(pool)]
-                        previous_music=chosen;cfg['music_id']=chosen
+                    choices=pool
+                    if mode=='local':
+                        choices,cfg['music_match']=local_content.match_music(records,[dict(r,metadata=json.loads(r['metadata'])) for r in music_rows.values()],cfg.get('text_trace',{}).get('tags',[]),cfg.get('tags',[]))
+                        if not choices and not preview:raise ValueError('本地自动匹配未找到音乐；请补充标签，或选择单曲、多曲、无音乐。未联网或调用AI')
+                    if choices:
+                        chosen=local_content.allocate(choices,music_order,len(jobs),rng,rotation,'music')
+                        cfg['music_id']=chosen
                         cfg['music_snapshot']=dict(json.loads(music_rows[chosen]['metadata']),Music_ID=chosen,filename=music_rows[chosen]['name'],source=music_rows[chosen]['source'])
                     cfg['music_playback']=payload.get('music_playback','loop')
                     if cfg['music_playback'] not in {'loop','trim'}:raise ValueError('音乐播放方式无效')
@@ -328,7 +363,8 @@ class Workspace:
                     cfg['source_relations']=[dict(r) for aid in ordered for r in db.execute('SELECT pa.*,p.title,p.store,p.url FROM product_assets pa JOIN products p ON pa.product_id=p.id WHERE asset_id=?',(aid,)) if not origins or r['product_id'] in origins]
                     cfg['asset_snapshot']=[dict(db.execute('SELECT id,name,hash,path,source,metadata FROM assets WHERE id=?',(aid,)).fetchone()) for aid in ordered]
                     if cfg['music_id']:cfg['music_hash']=music_rows[cfg['music_id']]['hash']
-                    cfg['publication_content']=self.validate_content(payload.get('content',{}),cfg['source_relations'])
+                    explicit={k:v for k,v in payload.get('content',{}).items() if v or k in ('association','product_ids')}
+                    cfg['publication_content']=self.validate_content(dict(generated,**explicit),cfg['source_relations'])
                     task_id=uid()
                     jobs.append((task_id,batch,pid,sid,json.dumps(ordered),tid,json.dumps(cfg), 'waiting',0,None,'',now()))
                     previews.append({'id':task_id,'product_id':pid,'assets':ordered,'config':cfg})
@@ -449,7 +485,9 @@ class Workspace:
             v['resolved_path']=str((self.root/v['path']).resolve())
             v['available']=not v['deleted'] and Path(v['resolved_path']).is_file()
         result['templates']=self.templates()
-        result['settings']['music']={'auto':'ai','selected':'single'}.get(result['settings'].get('music'),result['settings'].get('music','none'))
+        result['local_records']=self.local_records()
+        for p in result['products']:p.update(json.loads(p['metadata']))
+        result['settings']['music']={'auto':'ai','selected':'single'}.get(result['settings'].get('music'),result['settings'].get('music','local'))
         result['storage']['output']=result['settings'].get('output_dir') or str(self.root/'output')
         result['connection']='waiting'
         result['external']={'tiktok':'waiting','ai_copy':'waiting','ai_music':'waiting','pixabay':'waiting'}
@@ -474,10 +512,41 @@ class Workspace:
         cfg=json.loads(rows[0]['config'])
         for aid in json.loads(rows[0]['assets'])+([cfg['music_id']] if cfg.get('music_id') else []):self.asset_path(aid)
 
+    def local_records(self):
+        return [dict(json.loads(r['config']),id=r['id'],version=r['version']) for r in self.rows('SELECT * FROM local_records WHERE deleted=0 ORDER BY rowid')]
+
+    def save_local_record(self, payload):
+        r=local_content.validate(payload)
+        rid=r.get('id') or uid();identity=(r['kind'],local_content.norm(r['key']),r['language'])
+        with self.connection() as db:
+            old=db.execute('SELECT * FROM local_records WHERE id=?',(rid,)).fetchone()
+            if r.get('id') and not old:raise ValueError('更新对象不存在；新增记录请留空ID')
+            if old and (old['version']!=r.get('version') or tuple(old[k] for k in ('kind','key','language'))!=identity):raise ValueError('资料已更新或匹配身份不同，请重新载入；不覆盖其他对象')
+            aliases={local_content.norm(r['key']),*r.get('aliases',[])}
+            for other in self.local_records():
+                if other['id']!=rid and other['kind']==r['kind'] and other['language']==r['language'] and aliases.intersection({local_content.norm(other['key']),*other.get('aliases',[])}):raise ValueError('匹配键或别名与已有资料冲突：'+other['key'])
+            version=old['version']+1 if old else 1
+            db.execute('INSERT INTO local_records(id,kind,key,language,config,version) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,version=excluded.version,deleted=0',(rid,*identity,json.dumps(r),version))
+        return {'id':rid,'version':version}
+
+    def delete_local_record(self, rid, version):
+        with self.connection() as db:
+            r=db.execute('UPDATE local_records SET deleted=1,version=version+1 WHERE id=? AND version=? AND deleted=0',(rid,version))
+            if not r.rowcount:raise ValueError('资料已更新或删除，请重新载入')
+        return {'deleted':rid}
+
+    def import_local_records(self, rows):
+        if not isinstance(rows,list) or not 1<=len(rows)<=10000:raise ValueError('导入需要1到10000条记录')
+        result={'imported':[],'errors':[]}
+        for index,row in enumerate(rows,1):
+            try:result['imported'].append(dict(self.save_local_record(row),row=index))
+            except (ValueError,TypeError,sqlite3.IntegrityError) as e:result['errors'].append({'row':index,'error':str(e)})
+        return result
+
     def validate_content(self, content, sources=None):
-        allowed={'caption','tags','opening','cta','cover','association','product_ids'}
+        allowed={'title','caption','tags','opening','cta','cover','association','product_ids'}
         if set(content)-allowed:raise ValueError('发布文字字段无效')
-        result={k:str(content.get(k,'')) for k in ('caption','tags','opening','cta','cover')}
+        result={k:str(content.get(k,'')) for k in ('title','caption','tags','opening','cta','cover')}
         if any(len(v)>10000 for v in result.values()):raise ValueError('发布文字过长')
         mode=content.get('association','none')
         if mode not in {'none','source','selected'}:raise ValueError('商品关联模式无效')

@@ -29,6 +29,7 @@ def main():
         '--add-data','runtime;runtime','tiktok_video_maker.py'],cwd=root,check=True)
     executable=root/'dist'/'TikTokVideoMaker'/'TikTokVideoMaker.exe'
     if not executable.is_file():raise SystemExit('EXE was not produced')
+    shutil.copy2(root/'docs'/'LOCAL_LIBRARY.md',executable.parent/'本地资料说明.md')
     print('Built executable:',executable)
     print('Windows interactive acceptance must pass before this is delivered.')
     manifest={'source_commit':os.environ.get('GITHUB_SHA'),'python':sys.version,'dependencies':{n:importlib.metadata.version(n) for n in ('pywebview','pyinstaller','pythonnet')},'runtime':json.loads((root/'runtime'/'build-inputs.json').read_text(encoding='utf-8'))}

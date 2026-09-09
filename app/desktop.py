@@ -101,6 +101,23 @@ class DesktopService:
         if name=='music-metadata':return w.update_music(p['id'],p['values'])
         if name=='delete-asset':return w.delete_asset(p['id'])
         if name=='content':return w.save_content(p['id'],p['content'])
+        if name=='local-save':return w.save_local_record(p)
+        if name=='local-delete':return w.delete_local_record(p['id'],p['version'])
+        if name=='local-import':
+            if 'records' in p:return w.import_local_records(p['records'])
+            import webview,csv
+            paths=self.choose(webview.FileDialog.OPEN,file_types=('本地资料 (*.json;*.csv)',))
+            if not paths:return {'cancelled':True}
+            path=Path(paths[0])
+            if path.stat().st_size>10_000_000:raise ValueError('资料文件超过10MB，请分批导入')
+            with path.open(encoding='utf-8-sig',newline='') as f:
+                rows=json.load(f) if path.suffix.lower()=='.json' else list(csv.DictReader(f))
+            if path.suffix.lower()=='.csv':
+                for row in rows:
+                    for key in ('confirmed','generic'):row[key]=row.get(key,'').lower() in ('true','1','yes')
+                    if row.get('version'):row['version']=int(row['version'])
+                    if row.get('kind')=='text':row['body']={k:row.pop(k,'') for k in ('title','caption','tags_text','opening','cta','cover')};row['body']['tags']=row['body'].pop('tags_text')
+            return w.import_local_records(rows)
         if name=='retry':w.retry(p['id']);return {'ok':True}
         if name=='regenerate':return {'id':w.regenerate(p['id'])}
         if name=='trash':w.trash(p['id'],bool(p.get('restore')));return {'ok':True}
@@ -147,8 +164,12 @@ class DesktopService:
             with w.connection() as db:
                 for row in rows:
                     if len(row['id'])>150 or len(row['title'])>1000:raise ValueError('商品字段过长')
+                    if any(len(row.get(k) or '')>20000 for k in ('details','category','keywords','video_titles')):raise ValueError('商品资料过长')
                 for row in rows:
-                    db.execute('INSERT INTO products VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,store=excluded.store,url=excluded.url',(row['id'].strip(),row['title'].strip(),row.get('store',''),row.get('url',''),now()))
+                    db.execute('INSERT INTO products(id,title,store,url,created) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,store=excluded.store,url=excluded.url',(row['id'].strip(),row['title'].strip(),row.get('store',''),row.get('url',''),now()))
+                    metadata=json.loads(db.execute('SELECT metadata FROM products WHERE id=?',(row['id'].strip(),)).fetchone()[0])
+                    metadata.update({k:row[k] or '' for k in ('details','category','keywords','video_titles') if k in row})
+                    db.execute('UPDATE products SET metadata=? WHERE id=?',(json.dumps(metadata),row['id'].strip()))
                     for sku in dict.fromkeys(s.strip() for s in row['skus'] if s.strip()):
                         db.execute('INSERT OR IGNORE INTO skus(id,product_id,name) VALUES(?,?,?)',(secrets.token_hex(16),row['id'].strip(),sku))
             return {'count':len(rows)}

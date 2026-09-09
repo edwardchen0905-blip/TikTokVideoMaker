@@ -45,12 +45,27 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await page.locator('a[href="#assets"]').first().click();
   const before=await state();assert.ok(before.assets.length>=3);
   const images=before.assets.filter(a=>a.kind==='image');const songs=before.assets.filter(a=>a.kind==='music');
+  await page.locator('a[href="#local"]').click();
+  if(process.env.TVM_CDP){
+   await click('import-local');await native('files','"'+fixture.local_file+'"');
+   await page.locator('#dialog-content').filter({hasText:'成功 2 条'}).waitFor();await click('close');
+  }else{
+   const imported=await page.evaluate(async records=>{const r=await fetch('/api/local-import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({records})});return r.json()},fixture.local_records);
+   assert.equal(imported.errors.length,0);await click('reconnect');
+  }
+  let record=(await state()).local_records.find(r=>r.key==='验收图案');assert.ok(record);
+  await page.locator('[data-search]').fill('验收图案');await click('edit-local:'+record.id);
+  await page.fill('#record-source','真实界面修改并保存的验收资料');await click('save-local');await page.locator('#dialog').waitFor({state:'hidden'});
+  record=(await state()).local_records.find(r=>r.id===record.id);assert.equal(record.version,2);
+  await page.locator('a[href="#music"]').click();await click('music-info:'+songs[0].id);await page.fill('#music-tags','quiet');await click('save-music:'+songs[0].id);await page.locator('#dialog').waitFor({state:'hidden'});
+  await page.locator('a[href="#assets"]').click();
+
   for(const image of images)await page.locator(`[data-select="asset"][value="${image.id}"]`).check();
   await click('asset-tasks');await page.locator('#batch-source').waitFor();
   await click('batch-none');assert.match(await page.locator('#batch-count').innerText(),/0条视频任务/);
   await click('batch-all');await page.selectOption('#group-mode','group');
   await page.fill('#batch-seconds','0.5');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-motion','none');
-  await page.selectOption('#batch-music','single');await page.locator(`[name=batch-song][value="${songs[0].id}"]`).check();
+  await page.selectOption('#batch-music','local');await page.selectOption('#local-language','en');await page.locator('[name=copy-source][value=existing]').check();await page.locator(`[name=copy-keyword][value="${record.id}"]`).check();
   await page.fill('#batch-copies','2');
   if(process.env.TVM_CDP){await click('pick-batch-output');await native('folder',fixture.output)}
   else await page.locator('#batch-output').evaluate((e,p)=>{e.value=p},fixture.output);
@@ -59,7 +74,9 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   let s=await waitFor(s=>s.videos.length===2,'two actual local videos');
   assert.ok(s.videos.every(v=>JSON.parse(v.validation).full_decode));
   assert.ok(s.tasks.every(t=>JSON.parse(t.config).music_id===songs[0].id));
-  assert.ok(s.videos.every(v=>path.resolve(path.dirname(v.path))===path.resolve(fixture.output)));
+  assert.ok(s.tasks.every(t=>JSON.parse(t.config).text_trace.language==='en'&&JSON.parse(t.config).music_match.status==='matched'));
+  assert.ok(s.videos.every(v=>JSON.parse(v.content).caption.includes('geometric details')&&JSON.parse(v.content).tags.includes('#geometricdetails')));
+  assert.ok(s.videos.every(v=>fs.realpathSync.native(path.dirname(v.path))===fs.realpathSync.native(fixture.output)));
   await page.locator('a[href="#videos"]').first().click();await click('focus-video:'+s.videos[0].id);
   await page.locator('video').waitFor();await page.locator('video').evaluate(v=>v.play());
   await page.waitForFunction(()=>document.querySelector('video')?.currentTime>0);
@@ -69,8 +86,14 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await page.locator(`[data-select="video"][value="${s.videos[0].id}"]`).check();
   await click('queue-selected');await page.fill('#queue-target','验收账号（未连接）');await click('confirm-queue');
   await page.locator('#dialog').waitFor({state:'hidden'});assert.equal((await state()).publications[0].status,'pending');
+  await page.locator('a[href="#local"]').click();await click('delete-local:'+record.id);await click('confirm-local:'+record.id);await page.locator('#dialog').waitFor({state:'hidden'});
+  await page.locator('a[href="#videos"]').click();
   await click('regenerate:'+s.videos[0].id);s=await waitFor(s=>s.videos.length===3,'regenerated video');
-  await page.locator('a[href="#music"]').first().click();await click('music-history:'+songs[0].id);
+  await page.locator('a[href="#music"]').first().click();
+  await page.locator('audio').evaluate(a=>a.play());
+  await page.waitForFunction(()=>document.querySelector('audio')?.currentTime>0);
+  await page.locator('audio').evaluate(a=>a.pause());
+  await click('music-history:'+songs[0].id);
   assert.match(await page.locator('#dialog-content').innerText(),/已完成/);await click('close');
   await click('delete-music:'+songs[0].id);await click('confirm-delete-music:'+songs[0].id);await page.locator('#dialog').waitFor({state:'hidden'});
   assert.equal((await state()).assets.find(a=>a.id===songs[0].id).available,false);
@@ -78,13 +101,14 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await page.locator('a[href="#products"]').first().click();await click('new-product');
   await page.fill('#product-id','UI-P1');await page.fill('#product-title','界面商品');await click('submit-product');await page.locator('#dialog').waitFor({state:'hidden'});
   await click('link-assets:UI-P1');for(const image of images)await page.locator(`[name=link-asset][value="${image.id}"]`).check();await click('submit-link:UI-P1');await page.locator('#dialog').waitFor({state:'hidden'});
-  await page.locator('[data-select="product"][value="UI-P1"]').check();await click('product-tasks');await page.fill('#batch-seconds','.4');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-music','none');
+  await page.locator('[data-select="product"][value="UI-P1"]').check();await click('product-tasks');await page.fill('#batch-seconds','.4');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-music','none');await page.selectOption('#local-language','th');await click('copy-none');
   await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});s=await waitFor(s=>s.videos.length===4,'product video');
   assert.ok(s.tasks.some(t=>t.product_id==='UI-P1'&&t.status==='done'));
+  const productTask=s.tasks.find(t=>t.product_id==='UI-P1');assert.equal(JSON.parse(productTask.config).text_trace.language,'th');assert.ok(JSON.parse(productTask.config).text_trace.fallback.caption);
   // Visit every real screen with populated records, including custom template save.
   await page.locator('a[href="#templates"]').first().click();await click('new-template');await page.fill('#template-name','验收配置');await click('submit-template');await page.locator('#dialog').waitFor({state:'hidden'});
   assert.ok((await state()).templates.some(t=>t.name==='验收配置'));
-  for(const route of ['home','shops','products','assets','music','templates','tasks','videos','publish','settings']){
+  for(const route of ['home','shops','products','assets','music','local','templates','tasks','videos','publish','settings']){
    await page.locator(`#navigation a[href="#${route}"]`).click();
    await page.waitForFunction(route=>document.querySelector(`#navigation a[href="#${route}"]`)?.classList.contains('active'),route);
    assert.ok(!(await page.locator('#page').innerText()).includes('undefined'),route);

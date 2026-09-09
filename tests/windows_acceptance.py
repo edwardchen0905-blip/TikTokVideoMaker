@@ -39,7 +39,8 @@ def main():
                 except (OSError,urllib.error.URLError):
                     if time.monotonic()>deadline:raise RuntimeError('Original EXE WebView did not initialize')
                     time.sleep(.2)
-            fixture={'pid':process.pid,'source':str(sources),'files':[str(p) for p in sources.iterdir()],'output':str(output)}
+            local_file=base/'本地资料.json';shutil.copy2(ROOT/'tests/local_fixture.json',local_file)
+            fixture={'local_file':str(local_file),'local_records':json.loads(local_file.read_text(encoding='utf-8')),'pid':process.pid,'source':str(sources),'files':[str(p) for p in sources.iterdir()],'output':str(output)}
             fixture_path=base/'fixture.json';fixture_path.write_text(json.dumps(fixture),encoding='utf-8')
             environment.update(TVM_CDP=f'http://127.0.0.1:{port}',TVM_FIXTURE=str(fixture_path),PYTHON=sys.executable)
             subprocess.run(['node','tests/ui_business.cjs'],cwd=ROOT,env=environment,check=True,timeout=480)
