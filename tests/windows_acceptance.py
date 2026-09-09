@@ -26,28 +26,35 @@ def close_normally(process,app,port,label):
     log=(app/'data'/'application.log').read_text(encoding='utf-8')
     required=2 if label=='restart' else 1
     if log.count('Normal service shutdown completed')<required:raise RuntimeError(f'{label}: normal shutdown log missing')
+    record_stage(label+'-exe-exited',pid=process.pid,exit_code=code,shutdown_log=True)
     deadline=time.monotonic()+20
+    attempt=0
     while True:
-        try:
-            with socket.create_connection(('127.0.0.1',port),timeout=1):pass
-        except ConnectionRefusedError:break
-        if time.monotonic()>=deadline:raise RuntimeError(f'{label}: old CDP listener still open after EXE exit')
+        attempt+=1
+        directory=EVIDENCE/f'{label}-exit-{attempt}';directory.mkdir()
+        # A TCP timeout does not establish whether a listener exists. Query Windows itself.
+        state=capture_processes(process.pid,directory,port=port,require_running=False)
+        listeners=[row for row in state['listeners'] if row['LocalPort']==port]
+        if not listeners:break
+        if time.monotonic()>=deadline:raise RuntimeError(f'{label}: CDP port still has listeners after EXE exit: {listeners}')
         time.sleep(.2)
     record_stage(label+'-normal-exit',pid=process.pid,exit_code=code,cdp_closed=True)
 
-def capture_processes(pid,directory=EVIDENCE):
+def capture_processes(pid,directory=EVIDENCE,*,port=None,require_running=True):
+    port_filter=f' -or $_.LocalPort -eq {int(port)}' if port is not None else ''
     script=f'''$ErrorActionPreference = 'Stop'
     $all = Get-CimInstance Win32_Process
     $owned = @({pid})
     do {{ $more = @($all | Where-Object {{ $_.ParentProcessId -in $owned -and $_.ProcessId -notin $owned }} | Select-Object -ExpandProperty ProcessId); $owned += $more }} while ($more.Count)
-    $processes = @($all | Where-Object {{ $_.ProcessId -in $owned }} | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine)
-    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -in $owned }} | Select-Object LocalAddress,LocalPort,OwningProcess)
+    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object {{ $_.OwningProcess -in $owned{port_filter} }} | Select-Object LocalAddress,LocalPort,OwningProcess)
+    $processes = @($all | Where-Object {{ $_.ProcessId -in $owned -or $_.ProcessId -in $listeners.OwningProcess }} | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine)
     @{{processes=$processes;listeners=$listeners}} | ConvertTo-Json -Depth 4
     '''
     with (directory/'owned-processes.json').open('w',encoding='utf-8') as log:
         subprocess.run(['pwsh','-NoProfile','-Command',script],stdout=log,stderr=subprocess.STDOUT,timeout=30,check=True)
     result=json.loads((directory/'owned-processes.json').read_text(encoding='utf-8-sig'))
-    if not any(p['ProcessId']==pid for p in result['processes']):raise RuntimeError('Test EXE missing from process evidence')
+    if not isinstance(result['processes'],list) or not isinstance(result['listeners'],list):raise RuntimeError('Invalid Windows process/listener evidence')
+    if require_running and not any(p['ProcessId']==pid for p in result['processes']):raise RuntimeError('Test EXE missing from process evidence')
     return result
 
 def main():
@@ -119,8 +126,10 @@ def main():
             record_stage('failed',error=repr(original_error))
             # Diagnose only this test's EXE and descendants. A diagnostic failure never passes acceptance.
             try:
-                with (EVIDENCE/'native-windows.txt').open('w',encoding='utf-8') as log:
-                    subprocess.run([sys.executable,'tests/windows_dialog.py',str(process.pid),'diagnose',str(EVIDENCE)],cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,timeout=45,check=True)
+                if process.poll() is None:
+                    with (EVIDENCE/'native-windows.txt').open('w',encoding='utf-8') as log:
+                        subprocess.run([sys.executable,'tests/windows_dialog.py',str(process.pid),'diagnose',str(EVIDENCE)],cwd=ROOT,stdout=log,stderr=subprocess.STDOUT,timeout=45,check=True)
+                else:record_stage('native-diagnostic-not-applicable',pid=process.pid,exit_code=process.returncode)
             except Exception as diagnostic_error:record_stage('diagnostic-failed',error=repr(diagnostic_error))
             raise
         finally:
