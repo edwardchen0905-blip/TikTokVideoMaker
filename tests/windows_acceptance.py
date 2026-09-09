@@ -26,7 +26,7 @@ def main():
         with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
         environment=os.environ.copy()
         # Debug transport is only enabled in this CI process; never written into the shipped app.
-        environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']=f'--remote-debugging-port={port}'
+        environment['TVM_CDP_PORT']=str(port)
         process=subprocess.Popen([str(app/'TikTokVideoMaker.exe')],cwd=base,env=environment)
         exited_normally=False
         try:
@@ -38,9 +38,11 @@ def main():
                     raise RuntimeError('Original EXE reported a startup error; see windows-application.log')
                 try:
                     with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version',timeout=1) as response:
-                        if response.status==200:break
+                        if response.status==200:
+                            (EVIDENCE/'windows-cdp.json').write_text(json.dumps(json.load(response),indent=2),encoding='utf-8')
+                            break
                 except (OSError,urllib.error.URLError):
-                    if time.monotonic()>deadline:raise RuntimeError('Original EXE WebView did not initialize')
+                    if time.monotonic()>deadline:raise RuntimeError('Acceptance CDP endpoint unavailable; this does not establish that the EXE or page failed to start')
                     time.sleep(.2)
             local_file=base/'本地资料.json';shutil.copy2(ROOT/'tests/local_fixture.json',local_file)
             fixture={'local_file':str(local_file),'local_records':json.loads(local_file.read_text(encoding='utf-8')),'pid':process.pid,'source':str(sources),'files':[str(p) for p in sources.iterdir()],'output':str(output)}

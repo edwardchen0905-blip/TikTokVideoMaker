@@ -237,6 +237,13 @@ def main():
             # Only the bundled browser directory is affected; user data permissions stay private.
             subprocess.run(['icacls',str(fixed_runtime),'/grant','*S-1-15-2-2:(OI)(CI)(RX)','*S-1-15-2-1:(OI)(CI)(RX)'],check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW,timeout=30)
         webview.settings['WEBVIEW2_RUNTIME_PATH']=str(fixed_runtime)
+        # Opt-in for acceptance only; normal portable launches expose no debugging port.
+        debug_port=os.environ.get('TVM_CDP_PORT')
+        if debug_port is not None:
+            port=int(debug_port)
+            if not 1024<=port<=65535:raise ValueError('TVM_CDP_PORT must be between 1024 and 65535')
+            webview.settings['REMOTE_DEBUGGING_PORT']=port
+            logging.info('Acceptance CDP port configured: %s',port)
     webview.settings['ALLOW_DOWNLOADS']=True
     workspace=Workspace(app_root()/'data')
     service=DesktopService(workspace);service.start()

@@ -57,7 +57,7 @@ jobs:
           node-version: '22'
       - name: Prepare build and test tools
         run: |
-          python -m pip install -r requirements.txt 'pyinstaller>=6,<7' pywinauto
+          python -m pip install -r requirements.txt 'pyinstaller>=6,<7' pywinauto Pillow
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
           npm install --no-save playwright@1.58.2
           if ($LASTEXITCODE -ne 0) { throw 'UI test dependency installation failed' }

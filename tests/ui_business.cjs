@@ -32,6 +32,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   const native=async(action,arg='')=>childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),action,arg],{cwd:root}));
   const waitFor=async(fn,label)=>{const until=Date.now()+90000;while(Date.now()<until){const s=await state();if(s.tasks.some(t=>t.status==='failed'))throw Error(s.tasks.filter(t=>t.status==='failed').map(t=>t.error).join('\n'));if(fn(s))return s;await new Promise(r=>setTimeout(r,250))}throw Error('Timed out: '+label)};
   await page.locator('#navigation a[href="#assets"]').waitFor();
+  if(process.env.TVM_CDP)await page.screenshot({path:path.join(evidence,'windows-startup.png'),fullPage:true});
   assert.equal((await state()).products.length,0);
   if(process.env.TVM_CDP){
    await page.locator('a[href="#assets"]').first().click();
