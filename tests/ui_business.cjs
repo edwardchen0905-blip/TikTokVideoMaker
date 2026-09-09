@@ -26,7 +26,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    const locator=page.locator(`[data-action="${action}"]`);
    // These are intentional duplicate entry points: thumbnail/details and header/empty state.
    if(action.startsWith('focus-video:'))return locator.filter({hasText:'查看'}).click();
-   return (['close','new-product'].includes(action)?locator.first():locator).click();
+   return (['close','new-product','import'].includes(action)?locator.first():locator).click();
   };
   const state=()=>page.evaluate(async()=>{const r=await fetch('/api/state');if(!r.ok)throw Error('state failed');return r.json()});
   const native=async(action,arg='')=>childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),action,arg],{cwd:root}));
@@ -126,4 +126,4 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   if(browser&&!process.env.TVM_CDP)await browser.close();
   if(server){server.stdin.end('\n');const [code]=await once(server,'exit');assert.equal(code,0,'UI fixture did not exit normally')}
  }
-})().catch(e=>{console.error(e);process.exitCode=1});
+})().catch(e=>{console.error(e);process.exit(1)});
