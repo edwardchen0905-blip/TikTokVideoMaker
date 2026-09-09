@@ -65,14 +65,32 @@ elif action=='close':
     window=app.window(title='TikTokVideoMaker')
     window.close()
 else:
-    # Captured UIA tree places the native picker beneath the owned WinForms window.
-    dialog=app.window(title='TikTokVideoMaker').child_window(control_type='Window')
+    import win32gui,win32process,win32con,json
+    from pywinauto.timings import wait_until,wait_until_passes
+    main_hwnd=app.window(title='TikTokVideoMaker').wrapper_object().handle
+    def find_picker():
+        matches=[]
+        def consider(hwnd,_):
+            # Five captured dialogs share this native identity; the web dialog has HWND=0.
+            if (win32process.GetWindowThreadProcessId(hwnd)[1]==pid
+                    and win32gui.GetClassName(hwnd)=='#32770'
+                    and win32gui.GetWindow(hwnd,win32con.GW_OWNER)==main_hwnd
+                    and win32gui.IsWindowVisible(hwnd) and win32gui.IsWindowEnabled(hwnd)):
+                matches.append(hwnd)
+        win32gui.EnumWindows(consider,None)
+        if not matches:raise LookupError('Native picker has not opened')
+        if len(matches)!=1:raise RuntimeError('Multiple owned native pickers: '+repr(matches))
+        return matches[0]
+    hwnd=wait_until_passes(20,.1,find_picker,(LookupError,))
+    dialog=app.window(handle=hwnd)
     dialog.wait('visible',timeout=20)
     if action=='cancel':dialog.child_window(auto_id='2',control_type='Button').invoke()
     else:
         # Actual captured dialogs: Open uses 1148; Select Folder uses 1152.
         edit=dialog.child_window(auto_id='1152' if action=='folder' else '1148',control_type='Edit')
         edit.set_edit_text(value)
+        if edit.get_value()!=value:raise RuntimeError('Native picker did not retain the supplied path')
         dialog.child_window(auto_id='1',control_type='Button').invoke()
-    dialog.wait_not('visible',timeout=20)
+    wait_until(20,.1,lambda:not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd))
+    print(json.dumps({'action':action,'hwnd':hwnd,'class':'#32770','pid':pid,'owner_hwnd':main_hwnd,'closed':True}))
 print('NATIVE_'+action.upper()+'_PASSED')

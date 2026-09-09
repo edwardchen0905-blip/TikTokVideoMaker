@@ -52,8 +52,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 45
     env:
-      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '' }}
-      TVM_CAPTURE_ONLY: '1'
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '34349459415' }}
+      TVM_CAPTURE_ONLY: '0'
     defaults:
       run:
         shell: pwsh
@@ -99,7 +99,7 @@ jobs:
           path: dist
           run-id: ${{ env.CANDIDATE_RUN_ID }}
           github-token: ${{ github.token }}
-      - name: Capture original native window evidence
+      - name: Verify the preserved EXE, native dialogs, production, exit and recovery
         run: python tests/windows_acceptance.py
       - name: Upload portable archive after acceptance
         if: env.TVM_CAPTURE_ONLY != '1'
