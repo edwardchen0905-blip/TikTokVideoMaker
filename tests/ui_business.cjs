@@ -22,7 +22,12 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    browser=await chromium.launch({headless:true,args:['--no-sandbox']});page=await browser.newPage({viewport:{width:1440,height:1000}});await page.goto(fixture.url);
   }
   page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
-  const click=action=>{const locator=page.locator(`[data-action="${action}"]`);return (action==='close'?locator.first():locator).click()};
+  const click=action=>{
+   const locator=page.locator(`[data-action="${action}"]`);
+   // These are intentional duplicate entry points: thumbnail/details and header/empty state.
+   if(action.startsWith('focus-video:'))return locator.filter({hasText:'查看'}).click();
+   return (['close','new-product'].includes(action)?locator.first():locator).click();
+  };
   const state=()=>page.evaluate(async()=>{const r=await fetch('/api/state');if(!r.ok)throw Error('state failed');return r.json()});
   const native=async(action,arg='')=>childResult(spawn(process.env.PYTHON||'python',['tests/windows_dialog.py',String(fixture.pid),action,arg],{cwd:root}));
   const waitFor=async(fn,label)=>{const until=Date.now()+90000;while(Date.now()<until){const s=await state();if(s.tasks.some(t=>t.status==='failed'))throw Error(s.tasks.filter(t=>t.status==='failed').map(t=>t.error).join('\n'));if(fn(s))return s;await new Promise(r=>setTimeout(r,250))}throw Error('Timed out: '+label)};
@@ -88,6 +93,9 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   fs.writeFileSync(path.join(evidence,process.env.TVM_CDP?'windows-ui.json':'linux-ui.json'),JSON.stringify({passed:true,original_page:true,real_videos:s.videos.length,errors,native_dialogs:!!process.env.TVM_CDP},null,2));
   console.log('REAL_UI_BUSINESS_PASSED');
   if(process.env.TVM_CDP)process.exit(0);
+ }catch(error){
+  if(page&&!page.isClosed())await page.screenshot({path:path.join(evidence,'failure.png'),fullPage:true});
+  throw error;
  }finally{
   if(browser&&!process.env.TVM_CDP)await browser.close();
   if(server){server.stdin.end('\n');const [code]=await once(server,'exit');assert.equal(code,0,'UI fixture did not exit normally')}
