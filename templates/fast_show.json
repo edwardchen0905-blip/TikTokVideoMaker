@@ -1,0 +1,9 @@
+{
+  "name": "fast_show",
+  "display_name": "快速轮播",
+  "duration_per_image": 1.0,
+  "transition": "slideleft",
+  "transition_duration": 0.25,
+  "motion": "none",
+  "music_volume": 0.65
+}

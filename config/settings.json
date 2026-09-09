@@ -1,0 +1,10 @@
+{
+  "resolution": "1080x1920",
+  "ratio": "9:16",
+  "format": "mp4",
+  "cache_policy": {
+    "auto_cleanup_days": 7,
+    "delete_generated_cache_only": true,
+    "preserve_original_assets": true
+  }
+}
