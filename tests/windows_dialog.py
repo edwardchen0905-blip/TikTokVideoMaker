@@ -1,6 +1,8 @@
 """CI-only native picker driver. Resolves controls inside the tested process; no coordinate clicks."""
 import sys
 from pywinauto import Application
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 pid=int(sys.argv[1]);action=sys.argv[2];value=sys.argv[3] if len(sys.argv)>3 else ''
 app=Application(backend='uia').connect(process=pid)
 if action=='diagnose':
@@ -14,7 +16,8 @@ elif action=='close':
     window=app.window(title='TikTokVideoMaker')
     window.close()
 else:
-    dialog=app.window(class_name='#32770')
+    # Captured UIA tree places the native picker beneath the owned WinForms window.
+    dialog=app.window(title='TikTokVideoMaker').child_window(control_type='Window')
     dialog.wait('visible',timeout=20)
     if action=='cancel':dialog.child_window(auto_id='2',control_type='Button').invoke()
     else:
