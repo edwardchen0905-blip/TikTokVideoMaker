@@ -14,7 +14,7 @@ import uuid
 import random
 import tempfile
 from datetime import datetime
-from core.template_manager import TemplateManager, seconds
+from core.render_config import TRANSITIONS, RESOLUTIONS, seconds, validate_config, transition_plan
 from core import local_content
 
 KINDS = {'.png':'image','.jpg':'image','.jpeg':'image','.webp':'image','.mp4':'video','.mov':'video','.mkv':'video','.webm':'video','.mp3':'music','.wav':'music','.m4a':'music','.aac':'music','.flac':'music'}
@@ -68,7 +68,6 @@ class Workspace:
                     if name not in existing:db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
             if 'content' not in {r['name'] for r in db.execute('PRAGMA table_info(publications)')}:
                 db.execute("ALTER TABLE publications ADD COLUMN content TEXT NOT NULL DEFAULT '{}'")
-            db.execute('CREATE TABLE IF NOT EXISTS user_templates(id TEXT PRIMARY KEY,config TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS local_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,key TEXT NOT NULL,language TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,UNIQUE(kind,key,language))')
             for r in local_content.builtins():
                 r=local_content.validate(r)
@@ -92,7 +91,7 @@ class Workspace:
         with self.connection() as db: return [dict(r) for r in db.execute(sql,args)]
 
     def save_settings(self, values):
-        allowed={'source','template','duration','music','music_ids','music_order','cacheDays','density','output_dir','download_retention','output_retention','production'}
+        allowed={'source','music','music_ids','music_order','cacheDays','density','output_dir','download_retention','output_retention','production'}
         if set(values)-allowed: raise ValueError('设置字段无效')
         if str(values.get('cacheDays','7')) not in {'0','1','7','30'}: raise ValueError('缓存保留时间无效')
         if values.get('music','local') not in {'none','local','ai','single','multi'}:raise ValueError('音乐模式无效；AI 选曲等待接入')
@@ -102,6 +101,8 @@ class Workspace:
         with self.connection() as db:
             stored=db.execute("SELECT value FROM settings WHERE key='production'").fetchone()
             production=dict(values.get('production',json.loads(stored[0]) if stored else {}))
+            for key in ('templates','template','copies','combination','duration'):
+                production.pop(key,None)
             for key in ('music','music_ids','music_order','output_dir'):
                 if key in values:production[key]=values[key]
             if production:values=dict(values,production=production)
@@ -239,34 +240,36 @@ class Workspace:
         with tempfile.TemporaryFile(dir=result):pass
         return result
 
-    def templates(self):
-        manager=TemplateManager()
-        result=[dict(manager.load(t),id=t) for t in manager.list_templates()]
-        return result+[dict(json.loads(r['config']),id=r['id']) for r in self.rows('SELECT * FROM user_templates')]
-
-    def save_template(self, payload):
-        config=TemplateManager.validate(payload)
-        tid=payload.get('id') or 'user_'+uid()
-        if not tid.startswith('user_') or len(tid)!=37 or any(c not in '0123456789abcdef' for c in tid[5:]):raise ValueError('内置模板请另存为自己的模板')
-        with self.connection() as db:
-            old=db.execute('SELECT config FROM user_templates WHERE id=?',(tid,)).fetchone()
-            config['version']=json.loads(old['config']).get('version',1)+1 if old else 1
-            db.execute('INSERT OR REPLACE INTO user_templates VALUES(?,?)',(tid,json.dumps(config)))
-        return tid
-
     def create_batch(self,payload,preview=False):
         if self.stopping.is_set():raise ValueError('软件正在关闭，不能创建任务')
+        if not isinstance(payload,dict):raise ValueError('任务设置必须为对象')
+        if set(payload)&{'templates','template','copies','combination'}:raise ValueError('旧生产模板已停用，请使用转场效果和生成视频数量')
         objects=payload.get('objects',[])
-        template_ids=list(dict.fromkeys(payload.get('templates',[])))
-        if not objects or not template_ids:raise ValueError('请选择生产对象和模板')
-        copies=payload.get('copies',1)
-        if type(copies) is not int or not 1<=copies<=1000:raise ValueError('生成数量必须为 1 到 1000 的整数')
-        combination=payload.get('combination','all')
+        if not isinstance(objects,list) or not objects or any(not isinstance(o,dict) for o in objects):raise ValueError('请选择至少一个商品或一组素材')
+        defaults=self.snapshot()['settings']
+        saved=dict(defaults.get('production') or {})
+        for key in ('objects','templates','template','copies','combination','duration','name'):
+            saved.pop(key,None)
+        for key in ('music','music_ids','music_order','output_dir'):
+            if key not in saved and key in defaults:saved[key]=defaults[key]
+        explicit=dict(payload)
+        payload=dict(saved,**payload)
+        # A timing mode selected for this task must not inherit the other mode's values.
+        if 'timing' in explicit:
+            for key in (('image_duration','asset_durations') if explicit['timing']=='total' else ('total_duration',)):
+                if key not in explicit:payload.pop(key,None)
+        if 'count' not in explicit:
+            saved_count=payload.get('count',1)
+            if type(saved_count) is not int:raise ValueError('保存的生成视频数量无效，请重新设置数量')
+            payload['count']=max(saved_count,len(objects))
+        count=payload.get('count',len(objects))
+        if type(count) is not int or not 1<=count<=10000:raise ValueError('生成视频数量必须为 1 到 10000 的整数')
+        if count<len(objects):raise ValueError(f'分别生成已选的 {len(objects)} 个对象，视频数量至少为 {len(objects)}；生成一条请改用合集或素材合组')
         order=payload.get('order','selected')
-        if combination not in {'all','cycle','random'} or order not in {'selected','reverse','random'}:raise ValueError('组合或顺序模式无效')
-        if len(objects)*len(template_ids)*copies>10000:raise ValueError('每批最多 10000 条任务')
-        available={t['id']:t for t in self.templates()}
-        if any(t not in available for t in template_ids):raise ValueError('模板不存在')
+        if order not in {'selected','reverse','random'}:raise ValueError('素材顺序无效')
+        overrides=payload.get('overrides',{})
+        if not isinstance(overrides,dict) or set(overrides)-{'transition_duration','motion','music_volume'}:raise ValueError('高级设置字段无效，请重新保存任务设置')
+        base_config=validate_config(dict(overrides,transitions=payload.get('transitions',['none']),resolution=payload.get('resolution','1080x1920'),fit=payload.get('fit','contain')))
         mode=payload.get('music','none')
         if mode in {'ai','auto'}:raise ValueError('AI 自动选曲和音乐源等待接入，未执行选曲')
         if mode=='selected':mode='single'  # Preserve existing single-song callers; never emulate AI.
@@ -278,7 +281,6 @@ class Workspace:
         music_order=payload.get('music_order','cycle')
         if music_order not in {'cycle','random'}:raise ValueError('音乐分配方式无效')
         rng=random.Random(payload.get('seed'))
-        defaults=self.snapshot()['settings']
         output_dir=self.check_output_dir(payload.get('output_dir') or defaults.get('output_dir'))
         batch=uid();jobs=[];previews=[];rotation={}
         records=self.local_records()
@@ -289,7 +291,9 @@ class Workspace:
                 r=db.execute("SELECT * FROM assets WHERE id=? AND kind='music'",(mid,)).fetchone()
                 if not r or r['deleted'] or not self.asset_path(mid).is_file():raise ValueError('音乐素材缺失')
                 music_rows[mid]=dict(r)
-            for obj in objects:
+            # Round-robin distributes the exact batch count without mixing object assets.
+            for job_index in range(count):
+                obj=objects[job_index%len(objects)]
                 pid=obj.get('product_id') or None;sid=obj.get('sku_id') or None
                 origins=obj.get('product_ids') or ([pid] if pid else [])
                 if len(origins)>1 and pid:raise ValueError('合集不能冒充单商品任务')
@@ -310,64 +314,66 @@ class Workspace:
                 if not visual:raise ValueError(f'{pid or "素材组"} 没有可用图片或视频')
                 selected_order=payload.get('asset_order',[])
                 if selected_order:visual=sorted(visual,key=lambda a:selected_order.index(a) if a in selected_order else len(selected_order)+visual.index(a))
-                versions=[t for _ in range(copies) for t in template_ids] if combination=='all' else [template_ids[i%len(template_ids)] if combination=='cycle' else rng.choice(template_ids) for i in range(copies)]
-                for version,tid in enumerate(versions,1):
-                    ordered=list(visual)
-                    if order=='reverse':ordered.reverse()
-                    if order=='random':rng.shuffle(ordered)
-                    overrides=payload.get('overrides',{})
-                    if set(overrides)-{'transition','transition_duration','motion','music_volume'}:raise ValueError('模板覆盖字段无效')
-                    cfg=dict(available[tid]);cfg.update(overrides)
-                    cfg=TemplateManager.validate(cfg)
-                    cfg['template_id']=tid;cfg['variant']=version
-                    timing=payload.get('timing','total' if str(payload.get('duration','template'))!='template' else 'images')
-                    if timing not in {'total','images'}:raise ValueError('时长模式无效')
-                    per_asset=payload.get('asset_durations',{})
-                    uniform=payload.get('image_duration')
-                    transition=cfg['transition_duration']
-                    if timing=='total':
-                        if uniform is not None or per_asset:raise ValueError('总时长与逐图时间冲突，请选择一种时长模式')
-                        total=seconds(payload.get('total_duration',payload.get('duration')), '总时长',36000)
-                        frames=round((total+(len(ordered)-1)*transition)*30)
-                        each,remainder=divmod(frames,len(ordered))
-                        durations=[seconds((each+(i<remainder))/30) for i in range(len(ordered))]
-                    else:durations=[seconds(per_asset.get(aid,uniform if uniform is not None else cfg['duration_per_image'])) for aid in ordered]
-                    if any(d<=transition for d in durations):raise ValueError('转场必须短于每份素材展示时间')
-                    cfg['durations']=durations;cfg['timing']=timing;cfg['expected_duration']=sum(durations)-(len(durations)-1)*transition
-                    if timing=='total' and abs(cfg['expected_duration']-total)>.1:raise ValueError('素材数与30fps无法满足指定总时长，请改用逐图时长')
-                    cfg['output_dir']=str(output_dir)
-                    actual_products=[dict(db.execute('SELECT * FROM products WHERE id=?',(p,)).fetchone()) for p in origins]
-                    for p in actual_products:p.update(json.loads(p['metadata']))
-                    actual_skus=[dict(r) for p in origins for r in db.execute('SELECT * FROM skus WHERE product_id=? AND (? IS NULL OR id=?)',(p,sid,sid))]
-                    asset_info=[dict(db.execute('SELECT * FROM assets WHERE id=?',(a,)).fetchone()) for a in ordered]
-                    copy_options=payload.get('local_copy',{'mode':'local','language':'th','sources':[]})
-                    if copy_options.get('mode','local')!='manual':
-                        prior=[json.loads(v['content']).get('title','') for v in db.execute('SELECT content FROM videos')]
-                        prior.extend(p.get('video_titles','') for p in actual_products)
-                        generated,cfg['text_trace']=local_content.compose(records,actual_products,actual_skus,asset_info,copy_options,prior,len(jobs),rng,rotation)
-                        cfg['local_copy']=copy_options
-                    else:generated={}
-                    cfg['music_mode']=mode;cfg['music_id']=None
-                    choices=pool
-                    if mode=='local':
-                        choices,cfg['music_match']=local_content.match_music(records,[dict(r,metadata=json.loads(r['metadata'])) for r in music_rows.values()],cfg.get('text_trace',{}).get('tags',[]),cfg.get('tags',[]))
-                        if not choices and not preview:raise ValueError('本地自动匹配未找到音乐；请补充标签，或选择单曲、多曲、无音乐。未联网或调用AI')
-                    if choices:
-                        chosen=local_content.allocate(choices,music_order,len(jobs),rng,rotation,'music')
-                        cfg['music_id']=chosen
-                        cfg['music_snapshot']=dict(json.loads(music_rows[chosen]['metadata']),Music_ID=chosen,filename=music_rows[chosen]['name'],source=music_rows[chosen]['source'])
-                    cfg['music_playback']=payload.get('music_playback','loop')
-                    if cfg['music_playback'] not in {'loop','trim'}:raise ValueError('音乐播放方式无效')
-                    cfg['music_fade']=float(payload.get('music_fade',0))
-                    if not math.isfinite(cfg['music_fade']) or not 0<=cfg['music_fade']<=cfg['expected_duration']/2:raise ValueError('音乐淡入淡出时间无效')
-                    cfg['source_relations']=[dict(r) for aid in ordered for r in db.execute('SELECT pa.*,p.title,p.store,p.url FROM product_assets pa JOIN products p ON pa.product_id=p.id WHERE asset_id=?',(aid,)) if not origins or r['product_id'] in origins]
-                    cfg['asset_snapshot']=[dict(db.execute('SELECT id,name,hash,path,source,metadata FROM assets WHERE id=?',(aid,)).fetchone()) for aid in ordered]
-                    if cfg['music_id']:cfg['music_hash']=music_rows[cfg['music_id']]['hash']
-                    explicit={k:v for k,v in payload.get('content',{}).items() if v or k in ('association','product_ids')}
-                    cfg['publication_content']=self.validate_content(dict(generated,**explicit),cfg['source_relations'])
-                    task_id=uid()
-                    jobs.append((task_id,batch,pid,sid,json.dumps(ordered),tid,json.dumps(cfg), 'waiting',0,None,'',now()))
-                    previews.append({'id':task_id,'product_id':pid,'assets':ordered,'config':cfg})
+                version=job_index//len(objects)+1
+                ordered=list(visual)
+                if order=='reverse':ordered.reverse()
+                if order=='random':rng.shuffle(ordered)
+                cfg=dict(base_config)
+                cfg['variant']=version
+                timing=payload.get('timing','images')
+                if timing not in {'total','images'}:raise ValueError('时长模式无效')
+                per_asset=payload.get('asset_durations',{})
+                uniform=payload.get('image_duration')
+                sequence,overlaps=transition_plan(cfg,len(ordered))
+                cfg['transition_sequence']=sequence;cfg['transition_durations']=overlaps
+                overlap=sum(overlaps)
+                if timing=='total':
+                    if uniform is not None or per_asset:raise ValueError('总时长与逐图时间冲突，请选择一种时长模式')
+                    total=seconds(payload.get('total_duration'), '视频总时长',36000)
+                    frames=round((total+overlap)*30)
+                    each,remainder=divmod(frames,len(ordered))
+                    durations=[seconds((each+(i<remainder))/30) for i in range(len(ordered))]
+                else:
+                    if payload.get('total_duration') is not None:raise ValueError('视频总时长与逐图时长冲突，请选择一种时长模式')
+                    if not isinstance(per_asset,dict):raise ValueError('逐图时长配置无效')
+                    durations=[seconds(per_asset.get(aid,uniform if uniform is not None else cfg['duration_per_image'])) for aid in ordered]
+                if any(gap>=min(durations[i],durations[i+1]) for i,gap in enumerate(overlaps)):raise ValueError('转场时长必须短于相邻两张图片的展示时间')
+                cfg['durations']=durations;cfg['timing']=timing;cfg['expected_duration']=sum(durations)-overlap
+                if timing=='total' and abs(cfg['expected_duration']-total)>.1:raise ValueError('素材数与30fps无法满足指定总时长，请改用逐图时长')
+                cfg['output_dir']=str(output_dir)
+                actual_products=[dict(db.execute('SELECT * FROM products WHERE id=?',(p,)).fetchone()) for p in origins]
+                for p in actual_products:p.update(json.loads(p['metadata']))
+                actual_skus=[dict(r) for p in origins for r in db.execute('SELECT * FROM skus WHERE product_id=? AND (? IS NULL OR id=?)',(p,sid,sid))]
+                asset_info=[dict(db.execute('SELECT * FROM assets WHERE id=?',(a,)).fetchone()) for a in ordered]
+                copy_options=payload.get('local_copy',{'mode':'local','language':'th','sources':[]})
+                if copy_options.get('mode','local')!='manual':
+                    prior=[json.loads(v['content']).get('title','') for v in db.execute('SELECT content FROM videos')]
+                    prior.extend(p.get('video_titles','') for p in actual_products)
+                    generated,cfg['text_trace']=local_content.compose(records,actual_products,actual_skus,asset_info,copy_options,prior,len(jobs),rng,rotation)
+                    cfg['local_copy']=copy_options
+                else:generated={}
+                cfg['music_mode']=mode;cfg['music_id']=None
+                choices=pool
+                if mode=='local':
+                    choices,cfg['music_match']=local_content.match_music(records,[dict(r,metadata=json.loads(r['metadata'])) for r in music_rows.values()],cfg.get('text_trace',{}).get('tags',[]),[])
+                    if not choices and not preview:raise ValueError('本地自动匹配未找到音乐；请补充标签，或选择单曲、多曲、无音乐。未联网或调用AI')
+                if choices:
+                    chosen=local_content.allocate(choices,music_order,len(jobs),rng,rotation,'music')
+                    cfg['music_id']=chosen
+                    cfg['music_snapshot']=dict(json.loads(music_rows[chosen]['metadata']),Music_ID=chosen,filename=music_rows[chosen]['name'],source=music_rows[chosen]['source'])
+                cfg['music_playback']=payload.get('music_playback','loop')
+                if cfg['music_playback'] not in {'loop','trim'}:raise ValueError('音乐播放方式无效')
+                cfg['music_fade']=float(payload.get('music_fade',0))
+                if not math.isfinite(cfg['music_fade']) or not 0<=cfg['music_fade']<=cfg['expected_duration']/2:raise ValueError('音乐淡入淡出时间无效')
+                cfg['source_relations']=[dict(r) for aid in ordered for r in db.execute('SELECT pa.*,p.title,p.store,p.url FROM product_assets pa JOIN products p ON pa.product_id=p.id WHERE asset_id=?',(aid,)) if not origins or r['product_id'] in origins]
+                cfg['asset_snapshot']=[dict(db.execute('SELECT id,name,hash,path,source,metadata FROM assets WHERE id=?',(aid,)).fetchone()) for aid in ordered]
+                if cfg['music_id']:cfg['music_hash']=music_rows[cfg['music_id']]['hash']
+                explicit={k:v for k,v in payload.get('content',{}).items() if v or k in ('association','product_ids')}
+                cfg['publication_content']=self.validate_content(dict(generated,**explicit),cfg['source_relations'])
+                task_id=uid()
+                # Empty legacy column preserves old databases without assigning a template.
+                jobs.append((task_id,batch,pid,sid,json.dumps(ordered),'',json.dumps(cfg), 'waiting',0,None,'',now()))
+                previews.append({'id':task_id,'product_id':pid,'assets':ordered,'config':cfg})
             if not preview:
                 db.execute('INSERT INTO batches VALUES(?,?,?)',(batch,str(payload.get('name','')).strip() or '视频生产批次',now()))
                 db.executemany('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',jobs)
@@ -400,7 +406,10 @@ class Workspace:
                 for item in cfg.get('asset_snapshot',[]):
                     if file_hash(self.asset_path(item['id']))!=item['hash']:raise ValueError('素材内容已变化：'+item['name'])
                 if music and cfg.get('music_hash') and file_hash(music)!=cfg['music_hash']:raise ValueError('音乐文件内容已变化')
-                cfg.setdefault('expected_duration',len(files)*cfg['duration_per_image']-(len(files)-1)*(cfg['transition_duration'] if cfg['transition']!='none' else 0))
+                if 'expected_duration' not in cfg:
+                    legacy=validate_config(cfg)
+                    _,overlaps=transition_plan(legacy,len(files))
+                    cfg['expected_duration']=sum(cfg.get('durations',[legacy['duration_per_image']]*len(files)))-sum(overlaps)
                 n=0
                 def progress(message):
                     nonlocal n
@@ -435,8 +444,13 @@ class Workspace:
             row=db.execute('SELECT t.* FROM videos v JOIN tasks t ON v.task_id=t.id WHERE v.id=?',(vid,)).fetchone()
             if not row:raise ValueError('视频不存在')
             self.check_task_inputs(row['id'])
-            t=dict(row);new=uid()
-            db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(new,t['batch_id'],t['product_id'],t['sku_id'],t['assets'],t['template'],t['config'],'waiting',0,None,'',now()))
+            t=dict(row);new=uid();cfg=json.loads(t['config'])
+            if t['template'] or 'template_id' in cfg:
+                # Preserve the original record; reproduce its effective settings without a template identity.
+                cfg=validate_config(cfg)
+                for key in ('template_id','name','version','transition'):cfg.pop(key,None)
+                cfg['transition_sequence'],cfg['transition_durations']=transition_plan(cfg,len(json.loads(t['assets'])))
+            db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(new,t['batch_id'],t['product_id'],t['sku_id'],t['assets'],'',json.dumps(cfg),'waiting',0,None,'',now()))
         self.start_worker();return new
 
     def asset_path(self,aid):
@@ -484,10 +498,18 @@ class Workspace:
         for v in result['videos']:
             v['resolved_path']=str((self.root/v['path']).resolve())
             v['available']=not v['deleted'] and Path(v['resolved_path']).is_file()
-        result['templates']=self.templates()
+        result['transitions']=TRANSITIONS
+        result['resolution_options']=RESOLUTIONS
         result['local_records']=self.local_records()
         for p in result['products']:p.update(json.loads(p['metadata']))
-        result['settings']['music']={'auto':'ai','selected':'single'}.get(result['settings'].get('music'),result['settings'].get('music','local'))
+        for key in ('template','duration'):result['settings'].pop(key,None)
+        production=result['settings'].get('production')
+        if isinstance(production,dict):
+            for key in ('templates','template','copies','combination','duration'):production.pop(key,None)
+            if isinstance(production.get('overrides'),dict):
+                previous=production['overrides'].pop('transition',None)
+                if 'transitions' not in production and previous in {t['id'] for t in TRANSITIONS}:production['transitions']=[previous]
+        result['settings']['music']={'auto':'ai','selected':'single'}.get(result['settings'].get('music'),result['settings'].get('music','none'))
         result['storage']['output']=result['settings'].get('output_dir') or str(self.root/'output')
         result['connection']='waiting'
         result['external']={'tiktok':'waiting','ai_copy':'waiting','ai_music':'waiting','pixabay':'waiting'}

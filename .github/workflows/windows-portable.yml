@@ -2,10 +2,6 @@ name: Validate and build Windows portable
 on:
   workflow_dispatch:
     inputs:
-      webview2_fixed_url:
-        description: Official Microsoft fixed x64 CAB URL (optional if exposed on the official page)
-        required: false
-        type: string
       candidate_run_id:
         description: Reuse an existing Windows-candidate artifact without rebuilding
         required: false
@@ -17,15 +13,16 @@ permissions:
   actions: read
 jobs:
   business:
-    # Business code is frozen on the upgrade branch; its existing regression remains valid.
-    if: github.ref == 'refs/heads/main'
+    # A changed application must pass its real UI flow before any Windows build.
+    # Script-only acceptance reruns reuse their preserved candidate without rebuilding.
+    if: ${{ (inputs.candidate_run_id || '') == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -33,13 +30,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          python -m pip install Pillow
           npm install --no-save playwright@1.58.2
           npx playwright install --with-deps chromium
-      - name: Real backend and UI regression
+      - name: Main branch backend gates
+        if: github.ref == 'refs/heads/main'
         run: |
           python -m unittest discover -s tests -v
           node tests/check_ui.cjs
-          node tests/ui_business.cjs
+      - name: Real UI and actual production before building
+        run: |
+          set -o pipefail
+          mkdir -p build/evidence
+          node tests/ui_business.cjs 2>&1 | tee build/evidence/ui-business.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -48,11 +51,11 @@ jobs:
           if-no-files-found: ignore
   windows:
     needs: business
-    if: always() && !cancelled() && (needs.business.result == 'success' || needs.business.result == 'skipped')
+    if: always() && !cancelled() && (needs.business.result == 'success' || ((inputs.candidate_run_id || '') != '' && needs.business.result == 'skipped'))
     runs-on: windows-2025
     timeout-minutes: 45
     env:
-      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '34349459415' }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id || '' }}
       TVM_CAPTURE_ONLY: '0'
     defaults:
       run:
@@ -61,22 +64,54 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
           architecture: x64
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Prepare build and test tools
         run: |
-          python -m pip install -r requirements.txt 'pyinstaller>=6,<7' pywinauto Pillow
+          python -m pip install -r requirements.txt pyinstaller==6.22.2 pythonnet==3.1.0 pywinauto Pillow
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
           npm install --no-save playwright@1.58.2
           if ($LASTEXITCODE -ne 0) { throw 'UI test dependency installation failed' }
-      - name: Prepare bundled runtimes
+      - name: Download the previously verified runtime source
         if: env.CANDIDATE_RUN_ID == ''
-        env:
-          WEBVIEW2_FIXED_URL: ${{ inputs.webview2_fixed_url }}
-        run: python prepare_windows_runtime.py
+        uses: actions/download-artifact@v4
+        with:
+          name: Windows-candidate
+          path: build/runtime-source
+          run-id: 34349459415
+          github-token: ${{ github.token }}
+      - name: Verify the original archive and reuse its exact runtimes
+        if: env.CANDIDATE_RUN_ID == ''
+        run: |
+          @'
+          from pathlib import Path, PurePosixPath
+          import hashlib, shutil, zipfile
+          archive = Path('build/runtime-source/TikTokVideoMaker_Portable.zip')
+          expected = 'a40fdd5cd6b8239ea0a472b6728a43daeed58183f55e7d9b251682c106aa44a0'
+          with archive.open('rb') as stream:
+              if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
+                  raise SystemExit('Original runtime source SHA-256 mismatch')
+          prefix = 'TikTokVideoMaker/runtime/'
+          with zipfile.ZipFile(archive) as bundle:
+              for item in bundle.infolist():
+                  if not item.filename.startswith(prefix) or item.is_dir():
+                      continue
+                  relative = PurePosixPath(item.filename[len(prefix):])
+                  if relative.is_absolute() or '..' in relative.parts:
+                      raise SystemExit('Invalid runtime archive path')
+                  target = Path('runtime').joinpath(*relative.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with bundle.open(item) as source, target.open('wb') as destination:
+                      shutil.copyfileobj(source, destination)
+          for name in ('ffmpeg.exe', 'ffprobe.exe', 'webview2/msedgewebview2.exe', 'build-inputs.json'):
+              if not (Path('runtime') / name).is_file():
+                  raise SystemExit('Missing preserved runtime: ' + name)
+          print('Verified runtimes restored from original candidate:', expected)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Preserved runtime verification failed' }
       - name: Build complete portable archive
         if: env.CANDIDATE_RUN_ID == ''
         run: python build_windows.py
@@ -102,7 +137,7 @@ jobs:
       - name: Verify the preserved EXE, native dialogs, production, exit and recovery
         run: python tests/windows_acceptance.py
       - name: Upload portable archive after acceptance
-        if: env.TVM_CAPTURE_ONLY != '1'
+        if: success() && env.TVM_CAPTURE_ONLY != '1'
         uses: actions/upload-artifact@v4
         with:
           name: TikTokVideoMaker_Portable

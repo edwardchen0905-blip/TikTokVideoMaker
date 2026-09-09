@@ -8,15 +8,18 @@ import secrets
 import subprocess
 import threading
 import logging
+import hashlib
+import tempfile
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import urlparse,parse_qs,unquote
 from core.paths import app_root
 from core.workspace import Workspace
 from core.workspace import now
+from core.render_config import validate_config, transition_plan
 
 class DesktopService:
     def __init__(self,workspace):
-        self.workspace=workspace;self.window=None;self.dialog_lock=threading.Lock();self.closing=False;self.token=secrets.token_urlsafe(32)
+        self.workspace=workspace;self.window=None;self.dialog_lock=threading.Lock();self.preview_lock=threading.Lock();self.closing=False;self.token=secrets.token_urlsafe(32)
         service=self
         class Handler(BaseHTTPRequestHandler):
             def authorized(self):
@@ -32,8 +35,12 @@ class DesktopService:
                     if parsed.path=='/api/state':self.json_response(service.workspace.snapshot());return
                     if parsed.path.startswith('/media/'):
                         parts=parsed.path.split('/')
-                        if len(parts)!=4 or parts[2] not in {'video','asset'}:self.send_error(404);return
-                        path=service.workspace.video_path(parts[-1]) if parts[2]=='video' else service.workspace.asset_path(parts[-1])
+                        if len(parts)!=4 or parts[2] not in {'video','asset','transition'}:self.send_error(404);return
+                        if parts[2]=='transition':
+                            key=parts[-1]
+                            if len(key)!=64 or any(c not in '0123456789abcdef' for c in key):self.send_error(404);return
+                            path=service.workspace.root/'cache'/'transition_previews'/(key+'.mp4')
+                        else:path=service.workspace.video_path(parts[-1]) if parts[2]=='video' else service.workspace.asset_path(parts[-1])
                     else:
                         name=unquote(parsed.path).lstrip('/') or 'index.html'
                         if name not in {'index.html','app.js','styles.css','connected.js'}:self.send_error(404);return
@@ -97,7 +104,7 @@ class DesktopService:
         if name=='link':w.link_assets(p['product_id'],p['ids'],p.get('metadata'));return {'ok':True}
         if name=='batch':return w.create_batch(p)
         if name=='batch-preview':return w.create_batch(p,preview=True)
-        if name=='template':return {'id':w.save_template(p)}
+        if name=='transition-preview':return self.transition_preview(p)
         if name=='music-metadata':return w.update_music(p['id'],p['values'])
         if name=='delete-asset':return w.delete_asset(p['id'])
         if name=='content':return w.save_content(p['id'],p['content'])
@@ -202,12 +209,48 @@ class DesktopService:
             return result[0]
         finally:self.dialog_lock.release()
 
+    def transition_preview(self,payload):
+        from renderer.video_engine import VideoEngine,validate_output
+        cfg=validate_config({'transitions':[payload.get('transition')],
+            'resolution':payload.get('resolution','1080x1920'),
+            'transition_duration':payload.get('transition_duration',.3)})
+        if cfg['transition_duration']>=2:raise ValueError('示意预览每张图片展示2秒，转场时间请设置为小于2秒')
+        cfg['durations']=[2,2]
+        cfg['transition_sequence'],cfg['transition_durations']=transition_plan(cfg,2)
+        cfg['expected_duration']=4-sum(cfg['transition_durations'])
+        key=hashlib.sha256(json.dumps(cfg,sort_keys=True).encode()).hexdigest()
+        folder=self.workspace.root/'cache'/'transition_previews'
+        path=folder/(key+'.mp4')
+        # The same workspace lock prevents retention from removing a preview while it is written.
+        with self.preview_lock,self.workspace.lock:
+            folder.mkdir(parents=True,exist_ok=True)
+            if not path.is_file():
+                with tempfile.TemporaryDirectory(prefix='preview_',dir=folder) as temporary:
+                    images=[]
+                    for index,color in enumerate(((66,126,199),(226,132,69))):
+                        image=Path(temporary)/f'{index}.ppm'
+                        pixels=bytearray()
+                        for y in range(240):
+                            for x in range(240):
+                                pixel=color if 12<=x<228 and 12<=y<228 else (245,247,250)
+                                if 76<=x<164 and 76<=y<164:pixel=(244,226,132) if index==0 else (88,155,112)
+                                pixels.extend(pixel)
+                        image.write_bytes(b'P6\n240 240\n255\n'+pixels)
+                        images.append(image)
+                    VideoEngine(cache_root=folder).generate(images,cfg,path)
+                try:validate_output(path,cfg)
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    raise
+        return {'url':'/media/transition/'+key,'config':cfg}
+
     def close(self):
         self.closing=True
         self.workspace.stopping.set()
         worker=self.workspace.worker
         if worker and worker.is_alive():worker.join()
-        self.server.shutdown();self.server.server_close()
+        with self.preview_lock:
+            self.server.shutdown();self.server.server_close()
         logging.info('Normal service shutdown completed')
 
 def main():

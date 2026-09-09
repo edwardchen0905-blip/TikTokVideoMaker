@@ -37,7 +37,7 @@ class ExitChecks(unittest.TestCase):
         self.socket=self.stack.enter_context(patch.object(acceptance.socket,'create_connection',side_effect=TimeoutError('timed out')))
 
     def close(self,label='first'):
-        acceptance.close_normally(self.process,self.root,self.port,label)
+        return acceptance.close_normally(self.process,self.root,self.port,label)
 
     def stages(self):
         file=self.root/'windows-stages.jsonl'
@@ -48,7 +48,7 @@ class ExitChecks(unittest.TestCase):
         return {'processes':[{'ProcessId':9999}], 'listeners':[{'LocalPort':self.port,'OwningProcess':9999,'LocalAddress':'127.0.0.1'}]}
 
     def test_closed_with_tcp_timeout_uses_saved_os_evidence(self):
-        self.close()
+        self.assertEqual(self.close()['status'],'closed')
         self.assertIn('first-normal-exit',self.stages())
         self.socket.assert_not_called()
         self.process.wait.assert_called_once_with(timeout=60)
@@ -61,26 +61,38 @@ class ExitChecks(unittest.TestCase):
         self.assertIn('first-normal-exit',self.stages())
         self.assertTrue((self.root/'first-exit-2'/'owned-processes.json').is_file())
 
-    def test_persistent_listener_fails_with_owner_evidence(self):
+    def test_persistent_listener_is_an_independent_diagnostic(self):
         self.observations=[self.listening()];self.clock.side_effect=[0,21]
-        with self.assertRaisesRegex(RuntimeError,'9999'):self.close()
-        self.assertNotIn('first-normal-exit',self.stages())
+        result=self.close()
+        self.assertEqual(result['status'],'listening')
+        self.assertEqual(result['listeners'][0]['OwningProcess'],9999)
+        self.assertIn('first-normal-exit',self.stages())
         self.assertTrue((self.root/'first-exit-1'/'owned-processes.json').is_file())
 
-    def test_os_query_failure_is_not_a_closed_port(self):
+    def test_os_query_failure_does_not_change_verified_exit(self):
         self.observations=[subprocess.CalledProcessError(1,['pwsh'])]
-        with self.assertRaises(subprocess.CalledProcessError):self.close()
-        self.assertNotIn('first-normal-exit',self.stages())
+        result=self.close()
+        self.assertEqual(result['status'],'unknown')
+        self.assertIn('CalledProcessError',result['error'])
+        self.assertIn('first-normal-exit',self.stages())
 
-    def test_query_timeout_is_not_a_closed_port(self):
+    def test_query_timeout_allows_recovery_and_its_normal_exit(self):
         self.observations=[subprocess.TimeoutExpired(['pwsh'],30)]
-        with self.assertRaises(subprocess.TimeoutExpired):self.close()
-        self.assertNotIn('first-normal-exit',self.stages())
+        result=self.close()
+        self.assertEqual(result['status'],'unknown')
+        self.assertIn('TimeoutExpired',result['error'])
+        # The caller can continue to recovery; its own exit evidence is still mandatory.
+        self.observations=[{'processes':[],'listeners':[]}]
+        self.log.write_text('Normal service shutdown completed\n'*2,encoding='utf-8')
+        self.assertEqual(self.close('restart')['status'],'closed')
+        self.assertIn('restart-normal-exit',self.stages())
 
     def test_invalid_evidence_is_not_a_closed_port(self):
         self.observations=[{'processes':[],'listeners':None}]
-        with self.assertRaisesRegex(RuntimeError,'Invalid'):self.close()
-        self.assertNotIn('first-normal-exit',self.stages())
+        result=self.close()
+        self.assertEqual(result['status'],'unknown')
+        self.assertIn('Invalid',result['error'])
+        self.assertIn('first-normal-exit',self.stages())
 
     def test_nonzero_exit_fails_before_listener_query(self):
         self.process.wait.return_value=1

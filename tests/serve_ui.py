@@ -11,6 +11,11 @@ with tempfile.TemporaryDirectory(prefix='tvm_ui_') as tmp:
     root=Path(tmp);source=root/'sources';source.mkdir()
     repo=Path(__file__).resolve().parents[1]
     for p in (repo/'examples/input').iterdir():shutil.copy2(p,source/p.name)
+    from PIL import Image,ImageDraw
+    for index,color in enumerate(('navy','maroon','darkgreen'),3):
+        picture=Image.new('RGB',(360,360),'white');draw=ImageDraw.Draw(picture)
+        draw.rectangle((0,0,359,359),outline=color,width=16);draw.text((170,170),str(index),fill=color)
+        picture.save(source/f'验收方图{index}.png')
     workspace=Workspace(root/'data')
     imported=workspace.import_assets(list(source.iterdir()))
     assert not imported['errors'], imported

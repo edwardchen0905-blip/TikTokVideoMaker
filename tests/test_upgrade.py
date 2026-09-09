@@ -40,7 +40,7 @@ class UpgradeTests(unittest.TestCase):
         return ids
 
     def payload(self, **kw):
-        return dict({'objects':[{'assets':self.ids}],'templates':['fast_show'],'image_duration':.5,'overrides':{'transition':'none','motion':'none'},'output_dir':str(self.output)},**kw)
+        return dict({'objects':[{'assets':self.ids}],'transitions':['none'],'image_duration':.5,'overrides':{'motion':'none'},'output_dir':str(self.output)},**kw)
 
     def finish(self):
         worker=self.w.worker
@@ -52,7 +52,7 @@ class UpgradeTests(unittest.TestCase):
 
     def test_external_output_music_regeneration_and_restart(self):
         music=self.music()
-        self.w.create_batch(self.payload(copies=2,music='multi',music_ids=music))
+        self.w.create_batch(self.payload(count=2,music='multi',music_ids=music))
         state=self.finish();self.assertEqual(len(state['videos']),2)
         for v in state['videos']:
             task=next(t for t in state['tasks'] if t['id']==v['task_id']);cfg=json.loads(task['config'])
@@ -73,12 +73,39 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(len(reopened['videos']),3)
         self.assertEqual(reopened['videos'][0]['task_id'],new)
 
+        # Historical rows preserve their identity; regeneration uses their saved
+        # rendering and business facts without looking up removed template files.
+        legacy=json.loads(old_cfg)
+        for key in ('transitions','transition_sequence','transition_durations','resolution','ratio','width','height','fit'):
+            legacy.pop(key,None)
+        legacy.update(template_id='fast_show',name='快速展示模板',version=1,transition='none')
+        encoded=json.dumps(legacy)
+        with self.w.connection() as db:
+            db.execute('UPDATE tasks SET template=?,config=? WHERE id=?',('fast_show',encoded,old['task_id']))
+            db.execute('CREATE TABLE IF NOT EXISTS user_templates(id TEXT PRIMARY KEY,config TEXT NOT NULL)')
+            db.execute('INSERT INTO user_templates VALUES(?,?)',('historical_only',encoded))
+        self.w=Workspace(self.w.root)
+        self.assertNotIn('templates',self.w.snapshot())
+        historical=self.w.regenerate(old['id']);state=self.finish()
+        self.assertEqual(next(t['config'] for t in state['tasks'] if t['id']==old['task_id']),encoded)
+        task=next(t for t in state['tasks'] if t['id']==historical);cfg=json.loads(task['config'])
+        self.assertEqual(task['template'],'')
+        self.assertFalse({'name','template_id','version'} & cfg.keys())
+        for key in ('durations','expected_duration','motion','music_id','music_snapshot','music_hash',
+                    'local_copy','text_trace','publication_content','source_relations','asset_snapshot','output_dir'):
+            self.assertEqual(cfg[key],legacy[key],key)
+        self.assertEqual((cfg['transitions'],cfg['resolution'],cfg['fit']),(['none'],'1080x1920','contain'))
+        regenerated=next(v for v in state['videos'] if v['task_id']==historical)
+        self.assertTrue(Path(regenerated['path']).parent.samefile(self.output))
+        self.assertTrue(json.loads(regenerated['validation'])['full_decode'])
+        self.assertEqual(self.w.rows('SELECT config FROM user_templates WHERE id=?',('historical_only',))[0]['config'],encoded)
+
     def test_products_collection_snapshots_and_atomicity(self):
         for n,aid in enumerate(self.ids):
             self.w.product({'id':f'P{n}','title':f'Product {n}'})
             self.w.link_assets(f'P{n}',[aid])
         with patch.object(self.w,'start_worker'):
-            separate=self.w.create_batch(self.payload(objects=[{'product_id':'P0'},{'product_id':'P1'}],templates=['fast_show','product_show']))
+            separate=self.w.create_batch(self.payload(objects=[{'product_id':'P0'},{'product_id':'P1'}],count=4))
             self.assertEqual(separate['tasks'],4)
             for t in separate['preview']:self.assertEqual(t['assets'],[self.ids[int(t['product_id'][-1])]])
             group=self.w.create_batch(self.payload(objects=[{'product_ids':['P0','P1']}]))
@@ -90,21 +117,36 @@ class UpgradeTests(unittest.TestCase):
             self.assertEqual(before,len(self.w.snapshot()['tasks']))
         self.w.start_worker();self.finish()
 
-    def test_custom_template_timing_transitions_and_motion(self):
-        tid=self.w.save_template({'name':'用户配置','duration_per_image':2,'transition':'fade','transition_duration':.1,'motion':'none'})
-        for transition,motion in [('none','none'),('fade','zoom'),('slideright','pan'),('slideup','none'),('slidedown','none'),('slideleft','none')]:
-            self.w.create_batch(self.payload(templates=[tid],asset_durations={self.ids[0]:.4,self.ids[1]:.6},overrides={'transition':transition,'transition_duration':.1,'motion':motion}))
-            self.finish()
-        state=self.w.snapshot();self.assertEqual(len(state['videos']),6)
-        for task in state['tasks']:
-            cfg=json.loads(task['config']);self.assertEqual(cfg['durations'],[.4,.6]);self.assertEqual(cfg['duration_per_image'],2)
+    def test_mixed_transition_timing_persistence_and_conflicts(self):
+        third=self.root/'third.png'
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=green:s=80x80','-frames:v','1',str(third)],check=True,capture_output=True)
+        ids=self.ids+self.w.import_assets([third])['ids']
+        p=self.payload(objects=[{'assets':ids}],transitions=['none','fade'],
+                       asset_durations=dict(zip(ids,[.4,.6,.8])),overrides={'transition_duration':.1,'motion':'pan'})
+        with patch.object(self.w,'start_worker'):
+            result=self.w.create_batch(p)
+        cfg=json.loads(self.w.snapshot()['tasks'][0]['config'])
+        self.assertEqual(cfg,result['preview'][0]['config'])
+        self.assertEqual(cfg['durations'],[.4,.6,.8])
+        self.assertEqual(cfg['transition_sequence'],['none','fade'])
+        self.assertEqual(cfg['transition_durations'],[0,.1])
+        self.assertAlmostEqual(cfg['expected_duration'],1.7)
+        self.assertEqual(cfg['motion'],'pan')
+        self.assertEqual(json.loads(Workspace(self.w.root).snapshot()['tasks'][0]['config']),cfg)
         with self.assertRaisesRegex(ValueError,'冲突'):self.w.create_batch(self.payload(timing='total',total_duration=2))
-        p=self.payload(timing='total',total_duration=1.1);p.pop('image_duration')
+        p=self.payload(objects=[{'assets':ids}],transitions=['none','fade'],
+                       overrides={'transition_duration':.1},timing='total',total_duration=1.1)
+        p.pop('image_duration')
         r=self.w.create_batch(p,preview=True);self.assertAlmostEqual(r['preview'][0]['config']['expected_duration'],1.1)
+        self.assertAlmostEqual(sum(r['preview'][0]['config']['durations']),1.2)
+        p=self.payload(image_duration=.4,transitions=['none'],overrides={'transition_duration':.7})
+        self.assertAlmostEqual(self.w.create_batch(p,preview=True)['preview'][0]['config']['expected_duration'],.8)
+        p['transitions']=['fade']
+        with self.assertRaisesRegex(ValueError,'转场'):self.w.create_batch(p,preview=True)
 
     def test_song_pool_order_random_and_ai_waiting(self):
         songs=self.music()
-        p=self.payload(copies=7,music='multi',music_ids=songs)
+        p=self.payload(count=7,music='multi',music_ids=songs)
         r=self.w.create_batch(p,preview=True)
         self.assertEqual([t['config']['music_id'] for t in r['preview']],(songs*4)[:7])
         p['music_order']='random';r=self.w.create_batch(p,preview=True)

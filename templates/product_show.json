@@ -1,9 +1,0 @@
-{
-  "name": "product_show",
-  "display_name": "商品展示",
-  "duration_per_image": 2.0,
-  "transition": "fade",
-  "transition_duration": 0.35,
-  "motion": "zoom",
-  "music_volume": 0.65
-}

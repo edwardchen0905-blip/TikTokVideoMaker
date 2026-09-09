@@ -67,6 +67,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await page.locator('a[href="#assets"]').first().click();
   const before=await state();assert.ok(before.assets.length>=3);
   const images=before.assets.filter(a=>a.kind==='image');const songs=before.assets.filter(a=>a.kind==='music');
+  assert.equal(images.length,5,'Five actual images are required to verify transition cycling');
   await page.locator('a[href="#local"]').click();
   if(process.env.TVM_CDP){
    await click('import-local');await native('files','"'+fixture.local_file+'"');
@@ -85,23 +86,52 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
 
   for(const image of images)await page.locator(`[data-select="asset"][value="${image.id}"]`).check();
   await click('asset-tasks');await page.locator('#batch-source').waitFor();
-  await click('batch-none');assert.match(await page.locator('#batch-count').innerText(),/0条视频任务/);
-  await click('batch-all');await page.selectOption('#group-mode','group');
-  await page.fill('#batch-seconds','0.5');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-motion','none');
+  assert.equal(await page.locator('#batch-advanced').getAttribute('open'),null);
+  assert.equal(await page.locator('#batch-count-number').inputValue(),'1');
+  assert.equal(await page.locator('#batch-resolution').inputValue(),'1080x1920');
+  assert.equal(await page.locator('[name=batch-transition][value=none]').isChecked(),true);
+  assert.equal(await page.locator('[data-action=submit-batch]').isEnabled(),true,'Selected materials and safe defaults must be enough');
+  await page.screenshot({path:path.join(evidence,'create-task-simple.png'),fullPage:true});
+  await click('batch-none');
+  assert.equal(await page.locator('[data-action=submit-batch]').isEnabled(),false);
+  assert.ok((await page.locator('#batch-missing').innerText()).trim());
+  assert.equal(await page.locator('#batch-missing').isVisible(),true);
+  await click('batch-all');
+  await page.locator('#batch-advanced > summary').click();
+  await page.selectOption('#group-mode','group');
+  await page.selectOption('#batch-timing','total');await click('submit-batch');
+  await page.locator('#dialog-error').filter({hasText:'冲突'}).waitFor();
+  assert.equal((await state()).tasks.length,0,'Conflicting timing must not create a task');
+  assert.equal(await page.locator('#dialog-error').isVisible(),true);
+  await page.screenshot({path:path.join(evidence,'create-task-error.png'),fullPage:true});
+  const errorBounds=await page.locator('#dialog-error').boundingBox(),viewportHeight=await page.evaluate(()=>innerHeight);
+  assert.ok(errorBounds&&errorBounds.y>=0&&errorBounds.y+errorBounds.height<=viewportHeight,'Dialog error must remain on screen');
+  assert.equal(await page.locator('#batch-seconds').evaluate(e=>document.activeElement===e),true);
+  await page.selectOption('#batch-timing','images');
+  await page.fill('#batch-seconds','0.5');await page.fill('#batch-transition-time','0.1');await page.selectOption('#batch-motion','none');
+  await page.locator('[name=batch-transition][value=slideleft]').check();await page.locator('[name=batch-transition][value=dissolve]').check();
   await page.selectOption('#batch-music','local');await page.selectOption('#local-language','en');await page.locator('[name=copy-source][value=existing]').check();await page.locator('summary').filter({hasText:'选择已有关键词'}).click();await page.locator(`[name=copy-keyword][value="${record.id}"]`).check();
-  await page.fill('#batch-copies','2');
+  await page.fill('#batch-count-number','2');
   if(process.env.TVM_CDP){
    await click('pick-batch-output');await native('folder',fixture.output);
    await page.waitForFunction(p=>document.querySelector('#batch-output')?.value.toLowerCase()===p,fs.realpathSync.native(fixture.output).toLowerCase());
    recordStage('output-directory-selected',{path:fixture.output});
   }
   else await page.locator('#batch-output').evaluate((e,p)=>{e.value=p},fixture.output);
-  await click('preview-batch');await page.locator('#batch-preview').filter({hasText:'1.000秒'}).waitFor();
+  await click('preview-batch');await page.locator('#batch-preview').filter({hasText:'2.300'}).waitFor();
   await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});
   let s=await waitFor(s=>s.videos.length===2,'two actual local videos');
   assert.ok(s.videos.every(v=>JSON.parse(v.validation).full_decode));
   assert.ok(s.tasks.every(t=>JSON.parse(t.config).music_id===songs[0].id));
   assert.ok(s.tasks.every(t=>JSON.parse(t.config).text_trace.language==='en'&&JSON.parse(t.config).music_match.status==='matched'));
+  for(const task of s.tasks){
+   const config=JSON.parse(task.config);
+   assert.equal(task.template,'');assert.equal(config.template_id,undefined);
+   assert.deepEqual(config.transitions,['none','slideleft','dissolve']);
+   assert.deepEqual(config.transition_sequence,['none','slideleft','dissolve','none']);
+   assert.deepEqual(config.transition_durations,[0,.1,.1,0]);
+   assert.equal(config.resolution,'1080x1920');assert.equal(config.ratio,'9:16');assert.equal(config.fit,'contain');
+  }
   assert.ok(s.videos.every(v=>JSON.parse(v.content).caption.includes('geometric details')&&JSON.parse(v.content).tags.includes('#geometricdetails')));
   assert.ok(s.videos.every(v=>fs.realpathSync.native(path.dirname(v.path))===fs.realpathSync.native(fixture.output)));
   assert.ok(s.tasks.every(t=>fs.realpathSync.native(JSON.parse(t.config).output_dir)===fs.realpathSync.native(fixture.output)));
@@ -142,18 +172,52 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   assert.match(await page.locator('#dialog-content').innerText(),/已完成/);await click('close');
   await click('delete-music:'+songs[0].id);await click('confirm-delete-music:'+songs[0].id);await page.locator('#dialog').waitFor({state:'hidden'});
   assert.equal((await state()).assets.find(a=>a.id===songs[0].id).available,false);
+  // A square output uses the same simple task flow and a single direct cut.
+  await page.locator('a[href="#assets"]').click();
+  for(const image of images)await page.locator(`[data-select="asset"][value="${image.id}"]`).check();
+  await click('asset-tasks');await page.locator('#batch-source').waitFor();
+  assert.equal(await page.locator('#batch-advanced').getAttribute('open'),null);
+  await page.selectOption('#batch-resolution','1080x1080');await page.selectOption('#batch-music','none');
+  await page.selectOption('#local-language','en');
+  await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});
+  s=await waitFor(s=>s.videos.length===4,'square video with safe defaults');
+  const square=s.tasks.find(t=>JSON.parse(t.config).resolution==='1080x1080');assert.ok(square);
+  assert.deepEqual(JSON.parse(square.config).transitions,['none']);assert.equal(JSON.parse(square.config).fit,'contain');
   // Real product creation, association, and production via DOM controls.
   await page.locator('a[href="#products"]').first().click();await click('new-product');
   await page.fill('#product-id','UI-P1');await page.fill('#product-title','界面商品');await click('submit-product');await page.locator('#dialog').waitFor({state:'hidden'});
   await click('link-assets:UI-P1');for(const image of images)await page.locator(`[name=link-asset][value="${image.id}"]`).check();await click('submit-link:UI-P1');await page.locator('#dialog').waitFor({state:'hidden'});
-  await page.locator('[data-select="product"][value="UI-P1"]').check();await click('product-tasks');await page.fill('#batch-seconds','.4');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-music','none');await page.selectOption('#local-language','th');await click('copy-none');
-  await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});s=await waitFor(s=>s.videos.length===4,'product video');
+  await page.locator('[data-select="product"][value="UI-P1"]').check();await click('product-tasks');
+  await page.selectOption('#batch-resolution','1920x1080');await page.selectOption('#batch-music','none');await page.selectOption('#local-language','th');
+  await page.locator('#batch-advanced > summary').click();await page.fill('#batch-seconds','.4');await click('copy-none');
+  await page.locator('[name=batch-transition][value=none]').uncheck();await page.locator('[name=batch-transition][value=fade]').check();
+  await page.fill('#batch-transition-time','.1');
+  await click('submit-batch');await page.locator('#dialog').waitFor({state:'hidden'});s=await waitFor(s=>s.videos.length===5,'product video');
   assert.ok(s.tasks.some(t=>t.product_id==='UI-P1'&&t.status==='done'));
   const productTask=s.tasks.find(t=>t.product_id==='UI-P1');assert.equal(JSON.parse(productTask.config).text_trace.language,'th');assert.ok(JSON.parse(productTask.config).text_trace.fallback.caption);
+  assert.deepEqual(JSON.parse(productTask.config).transition_sequence,['fade','fade','fade','fade']);
+  assert.equal(JSON.parse(productTask.config).resolution,'1920x1080');
   recordStage('product-video-produced',{task:productTask.id});
-  // Visit every real screen with populated records, including custom template save.
-  await page.locator('a[href="#templates"]').first().click();await click('new-template');await page.fill('#template-name','验收配置');await click('submit-template');await page.locator('#dialog').waitFor({state:'hidden'});
-  assert.ok((await state()).templates.some(t=>t.name==='验收配置'));
+  // Every advertised effect previews a real renderer output through the application's UI.
+  assert.equal(await page.locator('#navigation a[href="#templates"]').count(),0);
+  await page.locator('#navigation a[href="#home"]').click();
+  await page.getByRole('button',{name:'查看或编辑生产设置',exact:true}).click();
+  await page.locator('#batch-source').waitFor();await click('close');
+  await click('go:transitions');
+  await page.locator('#navigation a[href="#transitions"].active').waitFor();
+  await page.screenshot({path:path.join(evidence,'transition-effects.png'),fullPage:true});
+  const effects=(await state()).transitions;
+  assert.deepEqual(effects.map(e=>e.id),['none','fade','dissolve','slideleft','slideright','slideup','slidedown','coverleft','zoomsafe']);
+  for(const effect of effects){
+   await click('preview-transition:'+effect.id);
+   await page.locator('#dialog video').waitFor();
+   await page.locator('#dialog video').evaluate(v=>{v.currentTime=0;return v.play()});
+   await page.waitForFunction(()=>document.querySelector('#dialog video')?.currentTime>0);
+   await page.locator('#dialog video').evaluate(v=>v.pause());
+   assert.match(await page.locator('#dialog-content').innerText(),new RegExp(effect.name));
+   await click('close');
+  }
+  recordStage('all-transition-previews-played',{effects:effects.map(e=>e.id)});
   if(process.env.TVM_CDP){
    await page.locator('#navigation a[href="#products"]').click();await click('import-products');await click('pick-products');
    await native('files','"'+fixture.products_file+'"');
@@ -161,10 +225,10 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    assert.equal((await state()).products.find(p=>p.id==='CSV-P1').title,'CSV导入商品');
    recordStage('native-product-csv-imported');
   }
-  for(const route of ['home','shops','products','assets','music','local','templates','tasks','videos','publish','settings']){
+  for(const route of ['home','shops','products','assets','music','local','transitions','tasks','videos','publish','settings']){
    await page.locator(`#navigation a[href="#${route}"]`).click();
    await page.waitForFunction(route=>document.querySelector(`#navigation a[href="#${route}"]`)?.classList.contains('active'),route);
-   assert.ok(!(await page.locator('#page').innerText()).includes('undefined'),route);
+   const text=await page.locator('#page').innerText();assert.ok(!/undefined|fast_show|product_show/.test(text),route);
    if(['music','videos','home'].includes(route))await page.screenshot({path:path.join(evidence,route+'.png'),fullPage:true});
   }
   s=await state();
@@ -173,7 +237,9 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    const task=s.tasks.find(t=>t.id===video.task_id),config=JSON.parse(task.config),check=JSON.parse(video.validation);
    assert.equal(task.status,'done');assert.equal(task.output,video.path);assert.equal(video.available,true);
    assert.equal(fs.realpathSync.native(path.dirname(video.path)),fs.realpathSync.native(config.output_dir));
-   assert.equal(check.full_decode,true);assert.equal(check.width,1080);assert.equal(check.height,1920);assert.equal(check.fps,30);
+   const [width,height]=config.resolution.split('x').map(Number);
+   assert.equal(check.full_decode,true);assert.equal(check.width,width);assert.equal(check.height,height);assert.equal(check.fps,30);
+   assert.equal(check.resolution,config.resolution);assert.equal(check.ratio,config.ratio);assert.equal(check.fit,'contain');
    assert.equal(check.audio,!!config.music_id);assert.ok(Math.abs(video.duration-config.expected_duration)<=.1);
    assert.ok(fs.statSync(video.path).size>0);outputFiles.push({path:video.path,sha256:fileHash(video.path)});
   }
@@ -184,7 +250,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
     await page.waitForFunction(()=>document.querySelector('video')?.currentTime>0);await page.locator('video').evaluate(v=>v.pause());
    }
    await page.screenshot({path:path.join(evidence,'all-videos-verified.png'),fullPage:true});
-   const keys=['products','assets','skus','links','tasks','videos','publications','local_records','templates','settings'];
+   const keys=['products','assets','skus','links','tasks','videos','publications','local_records','transitions','resolution_options','settings'];
    fs.writeFileSync(path.join(evidence,'restart-expected.json'),JSON.stringify({state:Object.fromEntries(keys.map(k=>[k,s[k]])),files:outputFiles,originals:fixture.originals},null,2));
   }
   recordStage('all-output-files-verified',{videos:outputFiles.length});

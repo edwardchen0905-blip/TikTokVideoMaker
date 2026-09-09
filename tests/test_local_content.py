@@ -29,7 +29,7 @@ class LocalContentTests(unittest.TestCase):
   self.w.link_assets('P1',self.a)
   return p,m,c,text
  def payload(self,**extra):
-  return dict(objects=[{'assets':self.a}],templates=['fast_show'],music='none',image_duration=.4,overrides={'transition':'none','motion':'none'},local_copy={'mode':'local','language':'en','sources':[]},**extra)
+  return dict(objects=[{'assets':self.a}],transitions=['none'],music='none',image_duration=.4,overrides={'motion':'none'},local_copy={'mode':'local','language':'en','sources':[]},**extra)
  def preview(self,p):return self.w.create_batch(p,preview=True)['preview'][0]['config']
  def test_management_import_identity_restart_and_deleted_seed(self):
   self.assertEqual(len(self.w.local_records()),6)
@@ -62,6 +62,21 @@ class LocalContentTests(unittest.TestCase):
    if r['language']=='th':self.w.delete_local_record(r['id'],r['version'])
   with self.assertRaisesRegex(ValueError,'没有可用通用文本'):self.preview(p)
   self.assertFalse(self.w.snapshot()['tasks'])
+
+ def test_saved_production_language_and_explicit_override(self):
+  self.w.save_settings({'production':{'local_copy':{'mode':'local','language':'en','sources':[]},
+                                    'music':'none','transitions':['none'],'resolution':'1080x1080'}})
+  self.w=Workspace(self.w.root)
+  p={'objects':[{'assets':self.a}]}
+  en=self.preview(p)
+  self.assertEqual(en['text_trace']['language'],'en')
+  self.assertEqual(en['resolution'],'1080x1080')
+  self.assertTrue(en['publication_content']['caption'])
+  p['local_copy']={'mode':'local','language':'th','sources':[]}
+  th=self.preview(p)
+  self.assertEqual(th['text_trace']['language'],'th')
+  self.assertNotEqual(en['publication_content']['caption'],th['publication_content']['caption'])
+  self.assertEqual(self.w.snapshot()['settings']['production']['local_copy']['language'],'en')
  def test_negative_conflicting_facts_and_collection(self):
   self.data();self.keyword('keyword','磁吸','magnetic',property='feature',aliases=['磁力吸附'])
   p=self.payload();p['objects']=[{'product_id':'P1'}];p['local_copy']['sources']=['product_title','product_details']
@@ -98,7 +113,7 @@ class LocalContentTests(unittest.TestCase):
   self.assertEqual(self.preview(p)['music_match']['status'],'unmatched')
   with self.assertRaisesRegex(ValueError,'未找到音乐'):self.w.create_batch(p)
  def test_shuffle_and_selected_template_pool(self):
-  p=self.payload();p['copies']=4;p['seed']=7;p['local_copy']['order']='random'
+  p=self.payload();p['count']=4;p['seed']=7;p['local_copy']['order']='random'
   result=self.w.create_batch(p,preview=True)['preview'];titles=[t['config']['publication_content']['title'] for t in result]
   self.assertEqual(len(set(titles[:2])),2);self.assertNotEqual(titles[1],titles[2])
   with self.assertRaises(ValueError):self.keyword('material','bad','waterproof silicone')
