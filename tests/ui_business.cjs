@@ -33,6 +33,28 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    if(action.startsWith('focus-video:'))return locator.filter({hasText:'查看'}).click();
    return locator.click();
   };
+  const previewTransition=async(effect,expected)=>{
+   const request={transition:effect,...expected},started=Date.now();let response,result;
+   recordStage('transition-preview-started',{effect,request});
+   try{
+    // Full-resolution rendering is separate from the normal 20-second DOM/playback wait.
+    [response]=await Promise.all([
+     page.waitForResponse(r=>r.url().endsWith('/api/transition-preview')&&r.request().method()==='POST'&&r.request().postDataJSON().transition===effect,{timeout:90000}),
+     click('preview-transition:'+effect)
+    ]);
+    result=await response.json();
+    recordStage('transition-preview-response',{effect,elapsed_ms:Date.now()-started,http_status:response.status(),request:response.request().postDataJSON(),config:result.config,error:result.error||null});
+    assert.ok(response.ok(),result.error||`Transition preview HTTP ${response.status()}`);
+    assert.ok(!result.error,result.error);
+    assert.deepEqual(response.request().postDataJSON(),request);
+    assert.equal(result.config.resolution,expected.resolution);assert.equal(result.config.transition_duration,expected.transition_duration);
+    assert.deepEqual(result.config.transitions,[effect]);
+    return result;
+   }catch(error){
+    recordStage('transition-preview-failed',{effect,request,elapsed_ms:Date.now()-started,http_status:response?.status()??null,response_error:result?.error??null,error:String(error)});
+    throw error;
+   }
+  };
   const state=()=>page.evaluate(async()=>{const r=await fetch('/api/state');if(!r.ok)throw Error('state failed');return r.json()});
   let nativeSequence=0;
   const native=async(action,arg='')=>{
@@ -120,12 +142,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    recordStage('output-directory-selected',{path:fixture.output});
   }
   else await page.locator('#batch-output').evaluate((e,p)=>{e.value=p},fixture.output);
-  const batchPreviewResponse=page.waitForResponse(r=>r.url().endsWith('/api/transition-preview')&&r.request().method()==='POST');
-  await click('preview-transition:slideleft');
-  const previewResponse=await batchPreviewResponse;assert.equal(previewResponse.ok(),true);
-  const previewResult=await previewResponse.json();
-  assert.equal(previewResult.config.resolution,'1080x1920');assert.equal(previewResult.config.transition_duration,.1);
-  assert.deepEqual(previewResult.config.transitions,['slideleft']);
+  const previewResult=await previewTransition('slideleft',{resolution:'1080x1920',transition_duration:.1});
   assert.equal(await page.locator('#dialog[open] #batch-source').isVisible(),true,'Task dialog must remain open during its preview');
   await page.locator('#dialog[open] #batch-transition-preview video').evaluate(v=>v.play());
   await page.waitForFunction(()=>document.querySelector('#dialog[open] #batch-transition-preview video')?.currentTime>0);
@@ -222,7 +239,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   const effects=(await state()).transitions;
   assert.deepEqual(effects.map(e=>e.id),['none','fade','dissolve','slideleft','slideright','slideup','slidedown','coverleft','zoomsafe']);
   for(const effect of effects){
-   await click('preview-transition:'+effect.id);
+   await previewTransition(effect.id,{resolution:'1080x1920',transition_duration:.3});
    await page.locator('#dialog[open] video').waitFor();
    await page.locator('#dialog[open] video').evaluate(v=>{v.currentTime=0;return v.play()});
    await page.waitForFunction(()=>document.querySelector('#dialog[open] video')?.currentTime>0);
