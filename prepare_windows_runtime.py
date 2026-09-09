@@ -1,6 +1,5 @@
 """Download build dependencies from their publishers; never use the runner's browser."""
 import hashlib
-import html
 import json
 import os
 from pathlib import Path
@@ -12,6 +11,8 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
+# Verified on Microsoft's Fixed Version x64 download dialog, 2026-09-09.
+WEBVIEW2_FIXED_URL = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/0a4a34d9-ccaa-4cef-98b4-58cb313fbfeb/Microsoft.WebView2.FixedVersionRuntime.152.0.4191.62.x64.cab'
 
 def fetch(url):
     with urllib.request.urlopen(url, timeout=180) as response:
@@ -38,13 +39,7 @@ def main():
             if len(matches) != 1:
                 raise RuntimeError('Missing or ambiguous FFmpeg component: '+name)
             (runtime/name).write_bytes(bundle.read(matches[0]))
-    url = os.environ.get('WEBVIEW2_FIXED_URL', '').strip()
-    if not url:
-        page = html.unescape(fetch('https://developer.microsoft.com/en-us/microsoft-edge/webview2').decode()).replace('\\/', '/')
-        links = re.findall(r'https://msedge\.sf\.dl\.delivery\.mp\.microsoft\.com/[^\s"<>]+?\.x64\.cab', page)
-        if not links:
-            raise RuntimeError('Microsoft page did not expose a fixed x64 CAB URL; supply WEBVIEW2_FIXED_URL from the official download page')
-        url = links[0]
+    url = os.environ.get('WEBVIEW2_FIXED_URL', '').strip() or WEBVIEW2_FIXED_URL
     if not re.fullmatch(r'https://msedge\.sf\.dl\.delivery\.mp\.microsoft\.com/[^\s]+\.x64\.cab', url):
         raise ValueError('Only an official Microsoft fixed x64 CAB is accepted')
     cab = cache/'webview2.cab'

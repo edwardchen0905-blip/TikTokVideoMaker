@@ -45,24 +45,51 @@ class WorkspaceTests(unittest.TestCase):
         for n in range(2):
             pid=f'CA{n}';self.w.product({'id':pid,'title':pid});self.w.link_assets(pid,[self.ids[n]])
         with patch.object(self.w,'start_worker'):
-            with self.assertRaises(ValueError):self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'missing'}],'templates':['fast_show']})
+            with self.assertRaises(ValueError):self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'missing'}]})
             self.assertEqual(self.w.snapshot()['tasks'],[])
-            self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'CA1'}],'templates':['fast_show','product_show']})
+            self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'CA1'}],'count':4})
         tasks=self.w.snapshot()['tasks'];self.assertEqual(len(tasks),4)
         for t in tasks:self.assertEqual(json.loads(t['assets']),[self.ids[int(t['product_id'][-1])]])
+
+    def test_simple_defaults_and_exact_count_validation(self):
+        objects=[{'assets':[aid]} for aid in self.ids]
+        with patch.object(self.w,'start_worker'):
+            result=self.w.create_batch({'objects':[objects[0]]})
+            self.assertEqual(result['tasks'],1)
+            cfg=result['preview'][0]['config']
+            self.assertEqual(cfg['transitions'],['none'])
+            self.assertEqual((cfg['resolution'],cfg['ratio'],cfg['fit']),('1080x1920','9:16','contain'))
+            self.assertEqual(cfg['music_mode'],'none')
+            self.assertEqual(cfg['durations'],[2])
+            self.assertTrue(cfg['publication_content']['caption'])
+            self.assertFalse({'name','template_id'} & cfg.keys())
+            before=len(self.w.snapshot()['tasks'])
+            for extra in ({'templates':['fast_show']},{'copies':1},{'combination':'all'},
+                          {'count':0},{'count':True},{'count':1.5},{'count':10001},{'count':1}):
+                with self.subTest(extra=extra),self.assertRaises(ValueError):
+                    self.w.create_batch({'objects':objects,**extra})
+            self.assertEqual(len(self.w.snapshot()['tasks']),before)
+            self.assertEqual(self.w.create_batch({'objects':objects})['tasks'],2)
+            result=self.w.create_batch({'objects':objects,'count':5})
+        self.assertEqual([t['assets'] for t in result['preview']],[[self.ids[i%2]] for i in range(5)])
+        state=self.w.snapshot()
+        self.assertTrue(all(t['template']=='' for t in state['tasks']))
+        self.assertNotIn('templates',state)
+        self.assertGreaterEqual(len(state['transitions']),9)
+        self.assertEqual({r['id'] for r in state['resolution_options']},{'1080x1920','1080x1080','1920x1080'})
     def test_sku_matching(self):
         self.w.product({'id':'P','title':'Product','skus':['black','white']});skus=self.w.snapshot()['skus']
         self.w.link_assets('P',[self.ids[0]],{self.ids[0]:{'image_type':'main','position':1}})
         self.w.link_assets('P',[self.ids[1]],{self.ids[1]:{'image_type':'sku','position':1,'sku_id':skus[1]['id']}})
         with patch.object(self.w,'start_worker'):
-            self.w.create_batch({'objects':[{'product_id':'P','sku_id':skus[0]['id']},{'product_id':'P','sku_id':skus[1]['id']}],'templates':['fast_show']})
+            self.w.create_batch({'objects':[{'product_id':'P','sku_id':skus[0]['id']},{'product_id':'P','sku_id':skus[1]['id']}]})
         tasks=self.w.snapshot()['tasks']
         self.assertEqual(json.loads(tasks[0]['assets']),[self.ids[0]])
         self.assertEqual(json.loads(tasks[1]['assets']),self.ids)
     def test_real_batch_restart_and_publication(self):
         for n in range(2):
             pid=f'CA{n}';self.w.product({'id':pid,'title':pid});self.w.link_assets(pid,[self.ids[n]])
-        self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'CA1'}],'templates':['fast_show','product_show']})
+        self.w.create_batch({'objects':[{'product_id':'CA0'},{'product_id':'CA1'}],'count':4})
         worker=self.w.worker
         if worker:worker.join(timeout=90)
         state=self.w.snapshot()
@@ -89,7 +116,7 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(json.load(opener.open(req))['id'],'API')
         finally:service.close()
 
-    def test_hundred_products_two_templates(self):
+    def test_hundred_products_exact_count_without_crossing_assets(self):
         objects=[]
         for n in range(100):
             pid=f'BATCH-{n:03d}'
@@ -97,10 +124,13 @@ class WorkspaceTests(unittest.TestCase):
             self.w.link_assets(pid,[self.ids[n%2]])
             objects.append({'product_id':pid})
         with patch.object(self.w,'start_worker'):
-            result=self.w.create_batch({'objects':objects,'templates':['fast_show','product_show']})
+            result=self.w.create_batch({'objects':objects,'count':200})
         self.assertEqual(result['tasks'],200)
         jobs=self.w.snapshot()['tasks']
-        self.assertEqual(len({(t['product_id'],t['template']) for t in jobs}),200)
+        self.assertEqual([t['product_id'] for t in jobs],[obj['product_id'] for obj in objects]*2)
+        for t in jobs:
+            self.assertEqual(json.loads(t['assets']),[self.ids[int(t['product_id'][-3:])%2]])
+            self.assertEqual(t['template'],'')
 
     def test_video_and_music_import_render(self):
         import subprocess
@@ -110,7 +140,7 @@ class WorkspaceTests(unittest.TestCase):
         subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','sine=frequency=440:duration=0.5',str(music)],check=True)
         imported=self.w.import_assets([video,music])
         self.assertFalse(imported['errors'])
-        self.w.create_batch({'objects':[{'assets':[self.ids[0],imported['ids'][0]]}],'templates':['fast_show'],'music':'selected','music_id':imported['ids'][1]})
+        self.w.create_batch({'objects':[{'assets':[self.ids[0],imported['ids'][0]]}],'music':'selected','music_id':imported['ids'][1]})
         worker=self.w.worker
         if worker:worker.join(timeout=60)
         state=self.w.snapshot()

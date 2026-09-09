@@ -11,12 +11,17 @@ import sqlite3
 import threading
 import time
 import uuid
+import random
+import tempfile
+from datetime import datetime
+from core.render_config import TRANSITIONS, RESOLUTIONS, seconds, validate_config, transition_plan
+from core import local_content
 
 KINDS = {'.png':'image','.jpg':'image','.jpeg':'image','.webp':'image','.mp4':'video','.mov':'video','.mkv':'video','.webm':'video','.mp3':'music','.wav':'music','.m4a':'music','.aac':'music','.flac':'music'}
 
 def uid(): return uuid.uuid4().hex
 
-def now(): return time.strftime('%Y-%m-%d %H:%M:%S')
+def now(): return datetime.now().isoformat(timespec='microseconds')
 
 class Workspace:
     def __init__(self, root):
@@ -54,6 +59,21 @@ class Workspace:
             if 'source_id' not in {r['name'] for r in db.execute('PRAGMA table_info(skus)')}:
                 db.execute('ALTER TABLE skus ADD COLUMN source_id TEXT')
             db.execute("UPDATE tasks SET status='failed',error='软件在任务完成前关闭，可重新执行',progress=0 WHERE status='running'")
+            for table, fields in {
+                'assets': {'metadata': "TEXT NOT NULL DEFAULT '{}'", 'deleted': 'INTEGER NOT NULL DEFAULT 0'},
+                'videos': {'validation': "TEXT NOT NULL DEFAULT '{}'", 'content': "TEXT NOT NULL DEFAULT '{}'", 'deleted': 'INTEGER NOT NULL DEFAULT 0'},
+            }.items():
+                existing={r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
+                for name, declaration in fields.items():
+                    if name not in existing:db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {declaration}')
+            if 'content' not in {r['name'] for r in db.execute('PRAGMA table_info(publications)')}:
+                db.execute("ALTER TABLE publications ADD COLUMN content TEXT NOT NULL DEFAULT '{}'")
+            db.execute('CREATE TABLE IF NOT EXISTS local_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,key TEXT NOT NULL,language TEXT NOT NULL,config TEXT NOT NULL,version INTEGER NOT NULL,deleted INTEGER NOT NULL DEFAULT 0,UNIQUE(kind,key,language))')
+            for r in local_content.builtins():
+                r=local_content.validate(r)
+                db.execute('INSERT OR IGNORE INTO local_records(id,kind,key,language,config,version) VALUES(?,?,?,?,?,1)',(r['id'],r['kind'],local_content.norm(r['key']),r['language'],json.dumps(r)))
+            if 'metadata' not in {r['name'] for r in db.execute('PRAGMA table_info(products)')}:
+                db.execute("ALTER TABLE products ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
         self.worker = None
         self.stopping = threading.Event()
 
@@ -71,10 +91,21 @@ class Workspace:
         with self.connection() as db: return [dict(r) for r in db.execute(sql,args)]
 
     def save_settings(self, values):
-        allowed={'source','template','duration','music','cacheDays','density'}
+        allowed={'source','music','music_ids','music_order','cacheDays','density','output_dir','download_retention','output_retention','production'}
         if set(values)-allowed: raise ValueError('设置字段无效')
         if str(values.get('cacheDays','7')) not in {'0','1','7','30'}: raise ValueError('缓存保留时间无效')
+        if values.get('music','local') not in {'none','local','ai','single','multi'}:raise ValueError('音乐模式无效；AI 选曲等待接入')
+        if values.get('download_retention','keep') not in {'keep','after_tasks'}:raise ValueError('下载保留策略无效')
+        if values.get('output_retention','keep') not in {'keep','after_uploaded','after_published'}:raise ValueError('输出保留策略无效')
+        if values.get('output_dir'):values['output_dir']=str(self.check_output_dir(values['output_dir']))
         with self.connection() as db:
+            stored=db.execute("SELECT value FROM settings WHERE key='production'").fetchone()
+            production=dict(values.get('production',json.loads(stored[0]) if stored else {}))
+            for key in ('templates','template','copies','combination','duration'):
+                production.pop(key,None)
+            for key in ('music','music_ids','music_order','output_dir'):
+                if key in values:production[key]=values[key]
+            if production:values=dict(values,production=production)
             for k,v in values.items(): db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(k,json.dumps(v)))
         return self.snapshot()['settings']
 
@@ -94,7 +125,13 @@ class Workspace:
             existing=db.execute('SELECT id FROM products WHERE id=?',(pid,)).fetchone()
             if existing:
                 db.execute('UPDATE products SET title=?,store=?,url=? WHERE id=?',(title,str(p.get('store','')),str(p.get('url','')),pid))
-            else: db.execute('INSERT INTO products VALUES(?,?,?,?,?)',(pid,title,str(p.get('store','')),str(p.get('url','')),now()))
+            else: db.execute('INSERT INTO products(id,title,store,url,created) VALUES(?,?,?,?,?)',(pid,title,str(p.get('store','')),str(p.get('url','')),now()))
+            old=json.loads(db.execute('SELECT metadata FROM products WHERE id=?',(pid,)).fetchone()[0])
+            for field in ('details','category','keywords','video_titles'):
+                if field in p:
+                    if not isinstance(p[field],str) or len(p[field])>20000:raise ValueError('商品资料格式无效或过长')
+                    old[field]=p[field]
+            db.execute('UPDATE products SET metadata=? WHERE id=?',(json.dumps(old),pid))
             for name,source_id in dict.fromkeys(skus):
                 db.execute('INSERT INTO skus(id,product_id,name,source_id) VALUES(?,?,?,?) ON CONFLICT(product_id,name) DO UPDATE SET source_id=COALESCE(excluded.source_id,skus.source_id)',(uid(),pid,name,source_id))
         return pid
@@ -121,11 +158,22 @@ class Workspace:
                 fingerprint=digest.hexdigest()
                 with self.connection() as db:
                     old=db.execute('SELECT id FROM assets WHERE hash=?',(fingerprint,)).fetchone()
-                    if old: imported.append(old['id']);continue
+                    if old:
+                        row=db.execute('SELECT * FROM assets WHERE id=?',(old['id'],)).fetchone()
+                        dest=self.root/row['path']
+                        if row['deleted'] or not dest.is_file():
+                            dest.parent.mkdir(parents=True,exist_ok=True)
+                            shutil.copy2(p,dest)
+                            db.execute('UPDATE assets SET deleted=0 WHERE id=?',(old['id'],))
+                        imported.append(old['id']);continue
                     aid=uid();dest=self.root/'original_imports'/aid/p.name;dest.parent.mkdir()
                     try:
                         shutil.copy2(p,dest)
-                        db.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?)',(aid,p.name,kind,'local',str(p),str(dest.relative_to(self.root)),fingerprint,p.stat().st_size,now()))
+                        tags={str(k).lower():v for k,v in info.get('format',{}).get('tags',{}).items()}
+                        for stream in info.get('streams',[]):
+                            tags.update({str(k).lower():v for k,v in stream.get('tags',{}).items()})
+                        metadata={'title':tags.get('title',p.name),'author':tags.get('artist',''),'source_url':'','license':tags.get('copyright',''),'tags':tags.get('genre',''),'duration':float(info.get('format',{}).get('duration',0))}
+                        db.execute('INSERT INTO assets(id,name,kind,source,original_path,path,hash,size,created,metadata) VALUES(?,?,?,?,?,?,?,?,?,?)',(aid,p.name,kind,'local',str(p),str(dest.relative_to(self.root)),fingerprint,p.stat().st_size,now(),json.dumps(metadata)))
                     except Exception:
                         shutil.rmtree(dest.parent);raise
                     imported.append(aid)
@@ -184,88 +232,208 @@ class Workspace:
             db.execute('INSERT INTO sync_tasks(id,store,status,error,created,rule_id,rule_snapshot,product_scope) VALUES(?,?,?,?,?,?,?,?)',(tid,store,'waiting_connection','等待连接 TikTok 店铺环境',now(),rule['id'],rule['config'],json.dumps(scope)))
         return tid
 
-    def create_batch(self,payload):
-        from core.template_manager import TemplateManager
-        objects=payload.get('objects',[]);template_ids=list(dict.fromkeys(payload.get('templates',[])))
-        if not objects or not template_ids: raise ValueError('请选择生产对象和模板')
-        if len(objects)*len(template_ids)>10000: raise ValueError('每批最多 10000 条任务')
-        configs={t:TemplateManager().load(t) for t in template_ids}
-        batch=uid();jobs=[]
+    def check_output_dir(self, path=None):
+        result=Path(path or self.root/'output').expanduser().resolve()
+        if not result.is_absolute():raise ValueError('输出目录无效')
+        if any(result.is_relative_to(self.root/n) for n in ('cache','original_imports','downloads','browser')):raise ValueError('输出目录不能放在素材或缓存目录内')
+        result.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryFile(dir=result):pass
+        return result
+
+    def create_batch(self,payload,preview=False):
+        if self.stopping.is_set():raise ValueError('软件正在关闭，不能创建任务')
+        if not isinstance(payload,dict):raise ValueError('任务设置必须为对象')
+        if set(payload)&{'templates','template','copies','combination'}:raise ValueError('旧生产模板已停用，请使用转场效果和生成视频数量')
+        objects=payload.get('objects',[])
+        if not isinstance(objects,list) or not objects or any(not isinstance(o,dict) for o in objects):raise ValueError('请选择至少一个商品或一组素材')
+        defaults=self.snapshot()['settings']
+        saved=dict(defaults.get('production') or {})
+        for key in ('objects','templates','template','copies','combination','duration','name'):
+            saved.pop(key,None)
+        for key in ('music','music_ids','music_order','output_dir'):
+            if key not in saved and key in defaults:saved[key]=defaults[key]
+        explicit=dict(payload)
+        payload=dict(saved,**payload)
+        # A timing mode selected for this task must not inherit the other mode's values.
+        if 'timing' in explicit:
+            for key in (('image_duration','asset_durations') if explicit['timing']=='total' else ('total_duration',)):
+                if key not in explicit:payload.pop(key,None)
+        if 'count' not in explicit:
+            saved_count=payload.get('count',1)
+            if type(saved_count) is not int:raise ValueError('保存的生成视频数量无效，请重新设置数量')
+            payload['count']=max(saved_count,len(objects))
+        count=payload.get('count',len(objects))
+        if type(count) is not int or not 1<=count<=10000:raise ValueError('生成视频数量必须为 1 到 10000 的整数')
+        if count<len(objects):raise ValueError(f'分别生成已选的 {len(objects)} 个对象，视频数量至少为 {len(objects)}；生成一条请改用合集或素材合组')
+        order=payload.get('order','selected')
+        if order not in {'selected','reverse','random'}:raise ValueError('素材顺序无效')
+        overrides=payload.get('overrides',{})
+        if not isinstance(overrides,dict) or set(overrides)-{'transition_duration','motion','music_volume'}:raise ValueError('高级设置字段无效，请重新保存任务设置')
+        base_config=validate_config(dict(overrides,transitions=payload.get('transitions',['none']),resolution=payload.get('resolution','1080x1920'),fit=payload.get('fit','contain')))
+        mode=payload.get('music','none')
+        if mode in {'ai','auto'}:raise ValueError('AI 自动选曲和音乐源等待接入，未执行选曲')
+        if mode=='selected':mode='single'  # Preserve existing single-song callers; never emulate AI.
+        if mode not in {'none','local','single','multi'}:raise ValueError('音乐模式无效')
+        pool=list(dict.fromkeys(payload.get('music_ids') or ([payload['music_id']] if payload.get('music_id') else [])))
+        if mode=='none':pool=[]
+        if mode=='single' and len(pool)!=1:raise ValueError('指定单曲需要选择一首音乐')
+        if mode=='multi' and not pool:raise ValueError('请选择本次音乐池')
+        music_order=payload.get('music_order','cycle')
+        if music_order not in {'cycle','random'}:raise ValueError('音乐分配方式无效')
+        rng=random.Random(payload.get('seed'))
+        output_dir=self.check_output_dir(payload.get('output_dir') or defaults.get('output_dir'))
+        batch=uid();jobs=[];previews=[];rotation={}
+        records=self.local_records()
         with self.connection() as db:
-            for obj in objects:
+            music_rows={}
+            if mode=='local':pool=[r['id'] for r in db.execute("SELECT id FROM assets WHERE kind='music' AND deleted=0") if self.asset_path(r['id']).is_file()]
+            for mid in pool:
+                r=db.execute("SELECT * FROM assets WHERE id=? AND kind='music'",(mid,)).fetchone()
+                if not r or r['deleted'] or not self.asset_path(mid).is_file():raise ValueError('音乐素材缺失')
+                music_rows[mid]=dict(r)
+            # Round-robin distributes the exact batch count without mixing object assets.
+            for job_index in range(count):
+                obj=objects[job_index%len(objects)]
                 pid=obj.get('product_id') or None;sid=obj.get('sku_id') or None
-                if pid:
-                    if not db.execute('SELECT 1 FROM products WHERE id=?',(pid,)).fetchone():raise ValueError('商品不存在')
-                    ids=list(dict.fromkeys(r[0] for r in db.execute("SELECT asset_id FROM product_assets WHERE product_id=? AND (sku_id IS NULL OR sku_id=?) ORDER BY CASE image_type WHEN 'main' THEN 0 WHEN 'detail' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,position,id",(pid,sid))))
-                else:ids=list(dict.fromkeys(obj.get('assets',[])))
-                if sid and (not pid or not db.execute('SELECT 1 FROM skus WHERE id=? AND product_id=?',(sid,pid)).fetchone()): raise ValueError('SKU 与商品不匹配')
+                origins=obj.get('product_ids') or ([pid] if pid else [])
+                if len(origins)>1 and pid:raise ValueError('合集不能冒充单商品任务')
+                if sid and (not pid or not db.execute('SELECT 1 FROM skus WHERE id=? AND product_id=?',(sid,pid)).fetchone()):raise ValueError('SKU 与商品不匹配')
+                ids=[]
+                for origin in origins:
+                    if not db.execute('SELECT 1 FROM products WHERE id=?',(origin,)).fetchone():raise ValueError('商品不存在')
+                    ids.extend(r[0] for r in db.execute("SELECT asset_id FROM product_assets WHERE product_id=? AND (? IS NULL OR sku_id IS NULL OR sku_id=?) ORDER BY CASE image_type WHEN 'main' THEN 0 WHEN 'detail' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,position,id",(origin,sid,sid)))
+                if not origins:ids=obj.get('assets',[])
+                ids=list(dict.fromkeys(ids))
                 visual=[]
                 for aid in ids:
-                    a=db.execute('SELECT * FROM assets WHERE id=?',(aid,)).fetchone()
-                    if not a:raise ValueError('素材不存在')
-                    if a['kind'] in ('image','video'):
-                        if not (self.root/a['path']).is_file():raise ValueError('素材文件缺失')
+                    row=db.execute('SELECT * FROM assets WHERE id=?',(aid,)).fetchone()
+                    if not row:raise ValueError('素材不存在')
+                    if row['kind'] in ('image','video'):
+                        if row['deleted'] or not self.asset_path(aid).is_file():raise ValueError('素材文件缺失：'+row['name'])
                         visual.append(aid)
-                if not visual:raise ValueError(f'{pid or "素材组"} 没有可生成视频的图片或视频素材')
-                for tid in template_ids:
-                    cfg=dict(configs[tid]);music_id=payload.get('music_id') or None
-                    mode=payload.get('music','none')
-                    if mode=='auto':
-                        found=db.execute("SELECT id FROM assets WHERE kind='music' ORDER BY created,id LIMIT 1").fetchone()
-                        if not found:raise ValueError('音乐库为空，无法自动匹配')
-                        music_id=found[0]
-                    if mode=='selected' and not music_id:raise ValueError('请选择音乐素材')
-                    if music_id and not db.execute("SELECT 1 FROM assets WHERE id=? AND kind='music'",(music_id,)).fetchone():raise ValueError('音乐素材无效')
-                    cfg['music_id']=music_id
-                    target=str(payload.get('duration','template'))
-                    if target!='template':
-                        if target not in {'15','30'}:raise ValueError('不支持的视频时长')
-                        cfg['duration_per_image']=(float(target)+(len(visual)-1)*cfg['transition_duration'])/len(visual)
-                        if cfg['duration_per_image']<=cfg['transition_duration']:raise ValueError('素材过多，无法匹配选定时长')
-                    jobs.append((uid(),batch,pid,sid,json.dumps(visual),tid,json.dumps(cfg), 'waiting',0,None,'',now()))
-            db.execute('INSERT INTO batches VALUES(?,?,?)',(batch,str(payload.get('name','')).strip() or '视频生产批次',now()))
-            db.executemany('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',jobs)
-        self.start_worker()
-        return {'batch':batch,'tasks':len(jobs)}
+                if not visual:raise ValueError(f'{pid or "素材组"} 没有可用图片或视频')
+                selected_order=payload.get('asset_order',[])
+                if selected_order:visual=sorted(visual,key=lambda a:selected_order.index(a) if a in selected_order else len(selected_order)+visual.index(a))
+                version=job_index//len(objects)+1
+                ordered=list(visual)
+                if order=='reverse':ordered.reverse()
+                if order=='random':rng.shuffle(ordered)
+                cfg=dict(base_config)
+                cfg['variant']=version
+                timing=payload.get('timing','images')
+                if timing not in {'total','images'}:raise ValueError('时长模式无效')
+                per_asset=payload.get('asset_durations',{})
+                uniform=payload.get('image_duration')
+                sequence,overlaps=transition_plan(cfg,len(ordered))
+                cfg['transition_sequence']=sequence;cfg['transition_durations']=overlaps
+                overlap=sum(overlaps)
+                if timing=='total':
+                    if uniform is not None or per_asset:raise ValueError('总时长与逐图时间冲突，请选择一种时长模式')
+                    total=seconds(payload.get('total_duration'), '视频总时长',36000)
+                    frames=round((total+overlap)*30)
+                    each,remainder=divmod(frames,len(ordered))
+                    durations=[seconds((each+(i<remainder))/30) for i in range(len(ordered))]
+                else:
+                    if payload.get('total_duration') is not None:raise ValueError('视频总时长与逐图时长冲突，请选择一种时长模式')
+                    if not isinstance(per_asset,dict):raise ValueError('逐图时长配置无效')
+                    durations=[seconds(per_asset.get(aid,uniform if uniform is not None else cfg['duration_per_image'])) for aid in ordered]
+                if any(gap>=min(durations[i],durations[i+1]) for i,gap in enumerate(overlaps)):raise ValueError('转场时长必须短于相邻两张图片的展示时间')
+                cfg['durations']=durations;cfg['timing']=timing;cfg['expected_duration']=sum(durations)-overlap
+                if timing=='total' and abs(cfg['expected_duration']-total)>.1:raise ValueError('素材数与30fps无法满足指定总时长，请改用逐图时长')
+                cfg['output_dir']=str(output_dir)
+                actual_products=[dict(db.execute('SELECT * FROM products WHERE id=?',(p,)).fetchone()) for p in origins]
+                for p in actual_products:p.update(json.loads(p['metadata']))
+                actual_skus=[dict(r) for p in origins for r in db.execute('SELECT * FROM skus WHERE product_id=? AND (? IS NULL OR id=?)',(p,sid,sid))]
+                asset_info=[dict(db.execute('SELECT * FROM assets WHERE id=?',(a,)).fetchone()) for a in ordered]
+                copy_options=payload.get('local_copy',{'mode':'local','language':'th','sources':[]})
+                if copy_options.get('mode','local')!='manual':
+                    prior=[json.loads(v['content']).get('title','') for v in db.execute('SELECT content FROM videos')]
+                    prior.extend(p.get('video_titles','') for p in actual_products)
+                    generated,cfg['text_trace']=local_content.compose(records,actual_products,actual_skus,asset_info,copy_options,prior,len(jobs),rng,rotation)
+                    cfg['local_copy']=copy_options
+                else:generated={}
+                cfg['music_mode']=mode;cfg['music_id']=None
+                choices=pool
+                if mode=='local':
+                    choices,cfg['music_match']=local_content.match_music(records,[dict(r,metadata=json.loads(r['metadata'])) for r in music_rows.values()],cfg.get('text_trace',{}).get('tags',[]),[])
+                    if not choices and not preview:raise ValueError('本地自动匹配未找到音乐；请补充标签，或选择单曲、多曲、无音乐。未联网或调用AI')
+                if choices:
+                    chosen=local_content.allocate(choices,music_order,len(jobs),rng,rotation,'music')
+                    cfg['music_id']=chosen
+                    cfg['music_snapshot']=dict(json.loads(music_rows[chosen]['metadata']),Music_ID=chosen,filename=music_rows[chosen]['name'],source=music_rows[chosen]['source'])
+                cfg['music_playback']=payload.get('music_playback','loop')
+                if cfg['music_playback'] not in {'loop','trim'}:raise ValueError('音乐播放方式无效')
+                cfg['music_fade']=float(payload.get('music_fade',0))
+                if not math.isfinite(cfg['music_fade']) or not 0<=cfg['music_fade']<=cfg['expected_duration']/2:raise ValueError('音乐淡入淡出时间无效')
+                cfg['source_relations']=[dict(r) for aid in ordered for r in db.execute('SELECT pa.*,p.title,p.store,p.url FROM product_assets pa JOIN products p ON pa.product_id=p.id WHERE asset_id=?',(aid,)) if not origins or r['product_id'] in origins]
+                cfg['asset_snapshot']=[dict(db.execute('SELECT id,name,hash,path,source,metadata FROM assets WHERE id=?',(aid,)).fetchone()) for aid in ordered]
+                if cfg['music_id']:cfg['music_hash']=music_rows[cfg['music_id']]['hash']
+                explicit={k:v for k,v in payload.get('content',{}).items() if v or k in ('association','product_ids')}
+                cfg['publication_content']=self.validate_content(dict(generated,**explicit),cfg['source_relations'])
+                task_id=uid()
+                # Empty legacy column preserves old databases without assigning a template.
+                jobs.append((task_id,batch,pid,sid,json.dumps(ordered),'',json.dumps(cfg), 'waiting',0,None,'',now()))
+                previews.append({'id':task_id,'product_id':pid,'assets':ordered,'config':cfg})
+            if not preview:
+                db.execute('INSERT INTO batches VALUES(?,?,?)',(batch,str(payload.get('name','')).strip() or '视频生产批次',now()))
+                db.executemany('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',jobs)
+        if not preview:self.start_worker()
+        return {'batch':batch,'tasks':len(jobs),'preview':previews}
 
     def start_worker(self):
         with self.lock:
             if self.worker and self.worker.is_alive():return
-            self.stopping.clear()
+            if self.stopping.is_set():return
             self.worker=threading.Thread(target=self._work,daemon=True);self.worker.start()
 
     def _work(self):
-        from renderer.video_engine import VideoEngine,probe_video
+        from renderer.video_engine import VideoEngine,validate_output
         while not self.stopping.is_set():
             with self.connection() as db:
                 t=db.execute("SELECT * FROM tasks WHERE status='waiting' ORDER BY created,id LIMIT 1").fetchone()
                 if not t:
                     self.worker=None
+                    self.apply_retention()
                     return
                 t=dict(t);db.execute("UPDATE tasks SET status='running',progress=1 WHERE id=?",(t['id'],))
+            generated=False
             try:
                 cfg=json.loads(t['config']);assets=json.loads(t['assets'])
                 files=[self.asset_path(a) for a in assets]
                 music=self.asset_path(cfg['music_id']) if cfg.get('music_id') else None
-                output=self.root/'output'/f"{t['id']}.mp4"
+                output=Path(cfg.get('output_dir',self.root/'output'))/f"{t['id']}.mp4"
+                self.check_output_dir(output.parent)
+                for item in cfg.get('asset_snapshot',[]):
+                    if file_hash(self.asset_path(item['id']))!=item['hash']:raise ValueError('素材内容已变化：'+item['name'])
+                if music and cfg.get('music_hash') and file_hash(music)!=cfg['music_hash']:raise ValueError('音乐文件内容已变化')
+                if 'expected_duration' not in cfg:
+                    legacy=validate_config(cfg)
+                    _,overlaps=transition_plan(legacy,len(files))
+                    cfg['expected_duration']=sum(cfg.get('durations',[legacy['duration_per_image']]*len(files)))-sum(overlaps)
                 n=0
                 def progress(message):
                     nonlocal n
                     n=min(95,n+max(1,90//(len(files)+2)))
                     with self.connection() as db:db.execute('UPDATE tasks SET progress=? WHERE id=?',(n,t['id']))
                 VideoEngine(cache_root=self.root/'cache').generate(files,cfg,output,music,progress)
-                info=probe_video(output);duration=float(info['format']['duration'])
-                if not math.isfinite(duration) or duration<=0:raise ValueError('生成的视频时长无效')
+                generated=True
+                validation=validate_output(output,cfg);duration=validation['duration']
                 with self.connection() as db:
-                    relative=str(output.relative_to(self.root))
-                    db.execute('INSERT INTO videos VALUES(?,?,?,?,?,0)',(uid(),t['id'],relative,duration,now()))
+                    relative=str(output.resolve())
+                    db.execute('INSERT INTO videos(id,task_id,path,duration,created,validation,content) VALUES(?,?,?,?,?,?,?)',(uid(),t['id'],relative,duration,now(),json.dumps(validation),json.dumps(cfg.get('publication_content',{}))))
                     db.execute("UPDATE tasks SET status='done',progress=100,output=?,error='' WHERE id=?",(relative,t['id']))
             except Exception as e:
                 # A failed result is never retained as an output eligible for retry.
-                (self.root/'output'/f"{t['id']}.mp4").unlink(missing_ok=True)
-                with self.connection() as db:db.execute("UPDATE tasks SET status='failed',error=? WHERE id=?",(str(e),t['id']))
+                # Rendered output belongs to this task; never remove another path.
+                failed=Path(json.loads(t['config']).get('output_dir',self.root/'output'))/f"{t['id']}.mp4"
+                error=str(e)
+                if generated:
+                    try:failed.unlink(missing_ok=True)
+                    except OSError as cleanup_error:error+='；失败文件清理失败：'+str(cleanup_error)
+                with self.connection() as db:db.execute("UPDATE tasks SET status='failed',error=? WHERE id=?",(error,t['id']))
 
     def retry(self,tid):
+        self.check_task_inputs(tid)
         with self.connection() as db:
             result=db.execute("UPDATE tasks SET status='waiting',progress=0,error='' WHERE id=? AND status='failed'",(tid,))
             if result.rowcount!=1:raise ValueError('仅失败任务可以重试')
@@ -275,8 +443,14 @@ class Workspace:
         with self.connection() as db:
             row=db.execute('SELECT t.* FROM videos v JOIN tasks t ON v.task_id=t.id WHERE v.id=?',(vid,)).fetchone()
             if not row:raise ValueError('视频不存在')
-            t=dict(row);new=uid()
-            db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(new,t['batch_id'],t['product_id'],t['sku_id'],t['assets'],t['template'],t['config'],'waiting',0,None,'',now()))
+            self.check_task_inputs(row['id'])
+            t=dict(row);new=uid();cfg=json.loads(t['config'])
+            if t['template'] or 'template_id' in cfg:
+                # Preserve the original record; reproduce its effective settings without a template identity.
+                cfg=validate_config(cfg)
+                for key in ('template_id','name','version','transition'):cfg.pop(key,None)
+                cfg['transition_sequence'],cfg['transition_durations']=transition_plan(cfg,len(json.loads(t['assets'])))
+            db.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(new,t['batch_id'],t['product_id'],t['sku_id'],t['assets'],'',json.dumps(cfg),'waiting',0,None,'',now()))
         self.start_worker();return new
 
     def asset_path(self,aid):
@@ -284,16 +458,19 @@ class Workspace:
         if not found:raise ValueError('素材不存在')
         p=(self.root/found[0]['path']).resolve()
         if not p.is_relative_to(self.root):raise ValueError('素材路径无效')
+        if not p.is_file():raise ValueError('素材文件已清理或缺失')
         return p
 
     def video_path(self,vid):
         found=self.rows('SELECT path FROM videos WHERE id=?',(vid,))
         if not found:raise ValueError('视频不存在')
         p=(self.root/found[0]['path']).resolve()
-        if not p.is_relative_to(self.root/'output'):raise ValueError('输出路径无效')
+        # Path comes only from a persisted task, never from an HTTP path parameter.
+        if not p.is_file():raise ValueError('视频文件已清理或缺失')
         return p
 
     def trash(self,vid,restore=False):
+        if restore:self.video_path(vid)
         with self.connection() as db:
             changed=db.execute('UPDATE videos SET trashed=? WHERE id=?',(0 if restore else 1,vid))
             if not changed.rowcount:raise ValueError('视频不存在')
@@ -303,7 +480,7 @@ class Workspace:
         with self.connection() as db:
             if not db.execute('SELECT id FROM videos WHERE id=? AND trashed=0',(vid,)).fetchone():raise ValueError('视频不存在或已在回收站')
             if db.execute("SELECT 1 FROM publications WHERE video_id=? AND target=? AND status='pending'",(vid,target)).fetchone():return
-            db.execute('INSERT INTO publications VALUES(?,?,?,?,?,?)',(uid(),vid,target,'pending','等待连接 TikTok 店铺环境',now()))
+            db.execute('INSERT INTO publications(id,video_id,target,status,error,created,content) VALUES(?,?,?,?,?,?,?)',(uid(),vid,target,'pending','等待连接 TikTok 店铺环境',now(),db.execute('SELECT content FROM videos WHERE id=?',(vid,)).fetchone()[0]))
 
     def publish(self,pid):
         raise RuntimeError('等待连接 TikTok 店铺环境；尚未执行上传或发布')
@@ -313,8 +490,29 @@ class Workspace:
             result={name:[dict(r) for r in db.execute('SELECT * FROM '+table)] for name,table in [('products','products'),('assets','assets'),('skus','skus'),('links','product_assets'),('tasks','tasks'),('batches','batches'),('videos','videos'),('publications','publications'),('sync_tasks','sync_tasks'),('download_rules','download_rules')]}
             result['settings']={r['key']:json.loads(r['value']) for r in db.execute('SELECT * FROM settings')}
         result['stores']=list(dict.fromkeys(p['store'] for p in result['products'] if p['store']))
-        result['storage']={'total':shutil.disk_usage(self.root).total,'free':shutil.disk_usage(self.root).free,'root':str(self.root),'output':str(self.root/'output'),'cache':sum(p.stat().st_size for p in (self.root/'cache').rglob('*') if p.is_file())}
+        result['storage']={'total':shutil.disk_usage(self.root).total,'free':shutil.disk_usage(self.root).free,'root':str(self.root),'output':str(self.root/'output'),'cache':sum(safe_size(p) for p in (self.root/'cache').rglob('*'))}
+        result['videos'].sort(key=lambda v:(v['created'],v['id']),reverse=True)
+        for a in result['assets']:
+            a['available']=not a['deleted'] and (self.root/a['path']).is_file()
+            a['metadata']=json.loads(a['metadata'])
+        for v in result['videos']:
+            v['resolved_path']=str((self.root/v['path']).resolve())
+            v['available']=not v['deleted'] and Path(v['resolved_path']).is_file()
+        result['transitions']=TRANSITIONS
+        result['resolution_options']=RESOLUTIONS
+        result['local_records']=self.local_records()
+        for p in result['products']:p.update(json.loads(p['metadata']))
+        for key in ('template','duration'):result['settings'].pop(key,None)
+        production=result['settings'].get('production')
+        if isinstance(production,dict):
+            for key in ('templates','template','copies','combination','duration'):production.pop(key,None)
+            if isinstance(production.get('overrides'),dict):
+                previous=production['overrides'].pop('transition',None)
+                if 'transitions' not in production and previous in {t['id'] for t in TRANSITIONS}:production['transitions']=[previous]
+        result['settings']['music']={'auto':'ai','selected':'single'}.get(result['settings'].get('music'),result['settings'].get('music','none'))
+        result['storage']['output']=result['settings'].get('output_dir') or str(self.root/'output')
         result['connection']='waiting'
+        result['external']={'tiktok':'waiting','ai_copy':'waiting','ai_music':'waiting','pixabay':'waiting'}
         return result
 
     def cleanup(self,days=0):
@@ -328,3 +526,125 @@ class Workspace:
                     removed+=sum(p.stat().st_size for p in directory.rglob('*') if p.is_file())
                     shutil.rmtree(directory)
             return removed
+
+
+    def check_task_inputs(self, tid):
+        rows=self.rows('SELECT assets,config FROM tasks WHERE id=?',(tid,))
+        if not rows:raise ValueError('任务不存在')
+        cfg=json.loads(rows[0]['config'])
+        for aid in json.loads(rows[0]['assets'])+([cfg['music_id']] if cfg.get('music_id') else []):self.asset_path(aid)
+
+    def local_records(self):
+        return [dict(json.loads(r['config']),id=r['id'],version=r['version']) for r in self.rows('SELECT * FROM local_records WHERE deleted=0 ORDER BY rowid')]
+
+    def save_local_record(self, payload):
+        r=local_content.validate(payload)
+        rid=r.get('id') or uid();identity=(r['kind'],local_content.norm(r['key']),r['language'])
+        with self.connection() as db:
+            old=db.execute('SELECT * FROM local_records WHERE id=?',(rid,)).fetchone()
+            if r.get('id') and not old:raise ValueError('更新对象不存在；新增记录请留空ID')
+            if old and (old['version']!=r.get('version') or tuple(old[k] for k in ('kind','key','language'))!=identity):raise ValueError('资料已更新或匹配身份不同，请重新载入；不覆盖其他对象')
+            aliases={local_content.norm(r['key']),*r.get('aliases',[])}
+            for other in self.local_records():
+                if other['id']!=rid and other['kind']==r['kind'] and other['language']==r['language'] and aliases.intersection({local_content.norm(other['key']),*other.get('aliases',[])}):raise ValueError('匹配键或别名与已有资料冲突：'+other['key'])
+            version=old['version']+1 if old else 1
+            db.execute('INSERT INTO local_records(id,kind,key,language,config,version) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,version=excluded.version,deleted=0',(rid,*identity,json.dumps(r),version))
+        return {'id':rid,'version':version}
+
+    def delete_local_record(self, rid, version):
+        with self.connection() as db:
+            r=db.execute('UPDATE local_records SET deleted=1,version=version+1 WHERE id=? AND version=? AND deleted=0',(rid,version))
+            if not r.rowcount:raise ValueError('资料已更新或删除，请重新载入')
+        return {'deleted':rid}
+
+    def import_local_records(self, rows):
+        if not isinstance(rows,list) or not 1<=len(rows)<=10000:raise ValueError('导入需要1到10000条记录')
+        result={'imported':[],'errors':[]}
+        for index,row in enumerate(rows,1):
+            try:result['imported'].append(dict(self.save_local_record(row),row=index))
+            except (ValueError,TypeError,sqlite3.IntegrityError) as e:result['errors'].append({'row':index,'error':str(e)})
+        return result
+
+    def validate_content(self, content, sources=None):
+        allowed={'title','caption','tags','opening','cta','cover','association','product_ids'}
+        if set(content)-allowed:raise ValueError('发布文字字段无效')
+        result={k:str(content.get(k,'')) for k in ('title','caption','tags','opening','cta','cover')}
+        if any(len(v)>10000 for v in result.values()):raise ValueError('发布文字过长')
+        mode=content.get('association','none')
+        if mode not in {'none','source','selected'}:raise ValueError('商品关联模式无效')
+        ids=content.get('product_ids',[]) if mode=='selected' else list(dict.fromkeys(r['product_id'] for r in (sources or []))) if mode=='source' else []
+        if mode=='selected' and not ids:raise ValueError('请选择发布关联商品')
+        for pid in ids:
+            if not self.rows('SELECT id FROM products WHERE id=?',(pid,)):raise ValueError('关联商品不存在')
+        result.update(association=mode,product_ids=ids)
+        return result
+
+    def save_content(self, vid, content):
+        with self.connection() as db:
+            row=db.execute('SELECT t.config FROM videos v JOIN tasks t ON v.task_id=t.id WHERE v.id=?',(vid,)).fetchone()
+            if not row:raise ValueError('视频不存在')
+            result=self.validate_content(content,json.loads(row['config']).get('source_relations',[]))
+            db.execute('UPDATE videos SET content=? WHERE id=?',(json.dumps(result),vid))
+        return result
+
+    def update_music(self, aid, values):
+        allowed={'title','author','source_url','license','tags'}
+        if set(values)-allowed or any(not isinstance(v,str) or len(v)>2000 for v in values.values()):raise ValueError('音乐元数据无效')
+        with self.connection() as db:
+            row=db.execute("SELECT metadata FROM assets WHERE id=? AND kind='music'",(aid,)).fetchone()
+            if not row:raise ValueError('音乐不存在')
+            metadata=json.loads(row['metadata']);metadata.update(values)
+            db.execute('UPDATE assets SET metadata=? WHERE id=?',(json.dumps(metadata),aid))
+        return metadata
+
+    def delete_asset(self, aid):
+        with self.connection() as db:
+            row=db.execute('SELECT * FROM assets WHERE id=?',(aid,)).fetchone()
+            if not row:raise ValueError('素材不存在')
+            for t in db.execute("SELECT assets,config FROM tasks WHERE status IN ('waiting','running','failed')"):
+                if aid in json.loads(t['assets']) or json.loads(t['config']).get('music_id')==aid:raise ValueError('素材被待执行、运行或待重试任务使用，不能删除')
+            path=(self.root/row['path']).resolve()
+            owned=any(path.is_relative_to(self.root/n) for n in ('original_imports','downloads'))
+            if not owned or path==Path(row['original_path']).resolve():raise ValueError('禁止删除用户原始文件')
+            path.unlink(missing_ok=True)
+            db.execute('UPDATE assets SET deleted=1 WHERE id=?',(aid,))
+        return {'deleted':aid}
+
+    def apply_retention(self):
+        settings=self.snapshot()['settings'];errors=[];removed=0
+        with self.lock:
+            if self.worker and self.worker.is_alive():return {'bytes':0,'errors':[]}
+            days=int(settings.get('cacheDays','7'))
+            if days:removed+=self.cleanup(days)
+            if settings.get('download_retention')=='after_tasks':
+                for a in self.rows("SELECT id FROM assets WHERE source='tiktok' AND deleted=0"):
+                    used=[t for t in self.rows('SELECT assets,status FROM tasks') if a['id'] in json.loads(t['assets'])]
+                    if used and all(t['status']=='done' for t in used):
+                        try:self.delete_asset(a['id'])
+                        except (ValueError,OSError) as e:errors.append(str(e))
+            policy=settings.get('output_retention','keep')
+            if policy!='keep':
+                accepted={'published'} if policy=='after_published' else {'uploaded','published'}
+                for v in self.rows('SELECT * FROM videos WHERE deleted=0'):
+                    pubs=self.rows('SELECT status FROM publications WHERE video_id=?',(v['id'],))
+                    if pubs and all(p['status'] in accepted for p in pubs):
+                        path=(self.root/v['path']).resolve()
+                        # Only a file generated under the saved task identity may be removed.
+                        if path.name!=v['task_id']+'.mp4':errors.append('输出归属不符，未清理');continue
+                        try:
+                            path.unlink(missing_ok=True)
+                            with self.connection() as db:db.execute('UPDATE videos SET deleted=1 WHERE id=?',(v['id'],))
+                        except OSError as e:errors.append(str(e))
+        return {'bytes':removed,'errors':errors}
+
+
+def safe_size(path):
+    try:return path.stat().st_size if path.is_file() else 0
+    except FileNotFoundError:return 0
+
+
+def file_hash(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
+    return digest.hexdigest()

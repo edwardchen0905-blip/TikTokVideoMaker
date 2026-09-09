@@ -1,2 +1,2 @@
 # Runtime dependency for the embedded desktop window; bundled in the portable application.
-pywebview>=6,<7
+pywebview==6.2.1

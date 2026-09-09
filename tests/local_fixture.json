@@ -1,0 +1,4 @@
+[
+ {"kind":"pattern","key":"验收图案","aliases":["product_01"],"en":"geometric details","th":"รายละเอียดลวดลาย","tags":["gentle"],"source":"自动验收临时资料，不随软件分发","confirmed":true},
+ {"kind":"music_rule","key":"验收音乐规则","match_tags":["gentle"],"music_tags":["quiet"],"source":"自动验收临时对应关系"}
+]
