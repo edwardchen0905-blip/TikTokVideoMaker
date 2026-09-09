@@ -65,7 +65,7 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await click('batch-none');assert.match(await page.locator('#batch-count').innerText(),/0条视频任务/);
   await click('batch-all');await page.selectOption('#group-mode','group');
   await page.fill('#batch-seconds','0.5');await page.selectOption('#batch-transition','none');await page.selectOption('#batch-motion','none');
-  await page.selectOption('#batch-music','local');await page.selectOption('#local-language','en');await page.locator('[name=copy-source][value=existing]').check();await page.locator(`[name=copy-keyword][value="${record.id}"]`).check();
+  await page.selectOption('#batch-music','local');await page.selectOption('#local-language','en');await page.locator('[name=copy-source][value=existing]').check();await page.locator('summary').filter({hasText:'选择已有关键词'}).click();await page.locator(`[name=copy-keyword][value="${record.id}"]`).check();
   await page.fill('#batch-copies','2');
   if(process.env.TVM_CDP){await click('pick-batch-output');await native('folder',fixture.output)}
   else await page.locator('#batch-output').evaluate((e,p)=>{e.value=p},fixture.output);
