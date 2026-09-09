@@ -209,6 +209,12 @@ def main():
     if os.name=='nt':
         if not (fixed_runtime/'msedgewebview2.exe').is_file():
             raise RuntimeError('便携版 WebView2 运行组件缺失')
+        import sys
+        if str(fixed_runtime).startswith('\\\\'):raise RuntimeError('请将便携包解压到本机磁盘；WebView2不支持网络共享路径')
+        if sys.getwindowsversion().build<22000:
+            # Microsoft requires these read/execute grants for fixed runtimes on Windows 10.
+            # Only the bundled browser directory is affected; user data permissions stay private.
+            subprocess.run(['icacls',str(fixed_runtime),'/grant','*S-1-15-2-2:(OI)(CI)(RX)','*S-1-15-2-1:(OI)(CI)(RX)'],check=True,capture_output=True,creationflags=subprocess.CREATE_NO_WINDOW,timeout=30)
         webview.settings['WEBVIEW2_RUNTIME_PATH']=str(fixed_runtime)
     webview.settings['ALLOW_DOWNLOADS']=True
     workspace=Workspace(app_root()/'data')

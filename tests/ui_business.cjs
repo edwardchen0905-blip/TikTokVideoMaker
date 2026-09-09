@@ -85,7 +85,8 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   await page.locator('a[href="#templates"]').first().click();await click('new-template');await page.fill('#template-name','验收配置');await click('submit-template');await page.locator('#dialog').waitFor({state:'hidden'});
   assert.ok((await state()).templates.some(t=>t.name==='验收配置'));
   for(const route of ['home','shops','products','assets','music','templates','tasks','videos','publish','settings']){
-   await page.locator(`#navigation a[href="#${route}"]`).click();await page.locator('h1').waitFor();
+   await page.locator(`#navigation a[href="#${route}"]`).click();
+   await page.waitForFunction(route=>document.querySelector(`#navigation a[href="#${route}"]`)?.classList.contains('active'),route);
    assert.ok(!(await page.locator('#page').innerText()).includes('undefined'),route);
    if(['music','videos','home'].includes(route))await page.screenshot({path:path.join(evidence,route+'.png'),fullPage:true});
   }

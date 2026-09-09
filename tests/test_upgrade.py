@@ -165,4 +165,28 @@ class UpgradeTests(unittest.TestCase):
         bad=self.root/'corrupt.mp4';bad.write_bytes(Path(v['path']).read_bytes()[:100])
         with self.assertRaises((ValueError,KeyError)):validate_output(bad,cfg)
 
+    def test_extreme_images_keep_all_four_corners_during_motion(self):
+        # Four colored corner markers must survive every sampled frame, including motion endpoints.
+        colors=[(255,0,0),(0,255,0),(0,0,255),(255,255,0)]
+        for width,height in ((2400,120),(120,2400)):
+            pixels=bytearray([80])*(width*height*3)
+            for i,color in enumerate(colors):
+                for y in range((height*3//4 if i//2 else 0),(height if i//2 else height//4)):
+                    for x in range((width*3//4 if i%2 else 0),(width if i%2 else width//4)):
+                        offset=(y*width+x)*3;pixels[offset:offset+3]=bytes(color)
+            source=self.root/f'corners-{width}.ppm'
+            source.write_bytes(f'P6\n{width} {height}\n255\n'.encode()+pixels)
+            for motion in ('none','zoom','pan'):
+                output=self.root/f'corners-{width}-{motion}.mp4'
+                VideoEngine().generate([source],{'duration_per_image':.5,'transition':'none','transition_duration':0,'motion':motion},output)
+                frames=subprocess.run(['ffmpeg','-v','error','-i',str(output),'-vf','scale=270:480','-pix_fmt','rgb24','-f','rawvideo','-'],check=True,capture_output=True).stdout
+                size=270*480*3
+                for frame in (frames[:size],frames[7*size:8*size],frames[-size:]):
+                    found=[0]*4
+                    for j in range(0,len(frame),3):
+                        r,g,b=frame[j:j+3]
+                        for i,(cr,cg,cb) in enumerate(colors):
+                            if abs(r-cr)<70 and abs(g-cg)<70 and abs(b-cb)<70:found[i]+=1
+                    self.assertTrue(all(n>=4 for n in found),(width,motion,found))
+
 if __name__=='__main__':unittest.main()
