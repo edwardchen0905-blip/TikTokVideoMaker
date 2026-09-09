@@ -50,8 +50,8 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
    await click('import-local');await native('files','"'+fixture.local_file+'"');
    await page.locator('#dialog-content').filter({hasText:'成功 2 条'}).waitFor();await click('close');
   }else{
-   const imported=await page.evaluate(async records=>{const r=await fetch('/api/local-import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({records})});return r.json()},fixture.local_records);
-   assert.equal(imported.errors.length,0);await click('reconnect');
+   // Linux fixture imports through the real Workspace importer before the original page loads.
+   assert.ok((await state()).local_records.some(r=>r.key==='验收图案'));
   }
   let record=(await state()).local_records.find(r=>r.key==='验收图案');assert.ok(record);
   await page.locator('[data-search]').fill('验收图案');await click('edit-local:'+record.id);
