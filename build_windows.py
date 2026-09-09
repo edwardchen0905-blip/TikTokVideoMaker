@@ -23,6 +23,8 @@ def main():
     # Builder dependencies belong to the build machine, not the user's machine.
     import PyInstaller
     import webview
+    if 'WEBVIEW2_RUNTIME_PATH' not in webview.settings:
+        raise SystemExit('Installed pywebview lacks fixed WebView2 support; install requirements.txt before building')
     subprocess.run([sys.executable,'-m','unittest','discover','-s','tests','-v'],cwd=root,check=True)
     subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--clean','--windowed','--onedir','--contents-directory','.',
         '--name','TikTokVideoMaker','--collect-all','webview','--copy-metadata','pywebview','--copy-metadata','pythonnet','--add-data','ui;ui','--add-data','templates;templates',

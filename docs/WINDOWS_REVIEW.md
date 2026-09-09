@@ -21,5 +21,8 @@ pywebview 官方 API：https://pywebview.flowrl.com/api/ 。GUI循环要求主�
 2026-09-09 构建输入核对：旧脚本从静态HTML提取CAB地址失败，Windows构建尚未开始。已通过微软实际固定版下载对话框确认152.0.4191.62 x64，构建脚本固定该输入，不增加网页抓取依赖。按微软文档为Windows 10随包runtime目录赋予App Container读取/执行权限，并明确拒绝UNC运行目录；Windows 10尚待实机验证。
 依据：https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution
 
-已核对 pywebview 6.0 的 window.py / platforms/winforms.py / event.py：文件对话框未自行进行 WinForms STA 调度，且捕获异常返回 None。统一文件选择入口通过既有 window.native.Invoke 在 UI 线程调用，捕获库的对话框错误日志并与取消区分。固定 pywebview 6.0 作为验证输入。
-源码：https://github.com/r0x0r/pywebview/blob/6.0/webview/platforms/winforms.py
+运行34338722526：26项业务检查和真实Linux界面生产通过；Windows构建完成，EXE未进入WebView。核对依赖源码发现6.0的ImmutableDict不允许WEBVIEW2_RUNTIME_PATH，且运行组件探测仅查注册表。改为已核实的6.2.1：支持该设置、固定组件探测和BrowserExecutableFolder；沿用同一pythonnet/WinForms依赖，无额外引擎或注册表伪装。构建前检查所需设置是否存在，启动异常写入日志。
+
+已重新核对6.2.1的文件选择与生命周期：文件对话框仍未自行进行WinForms STA调度，捕获异常返回None。统一入口继续通过既有window.native.Invoke在UI线程调用，区分错误和取消。
+源码：https://github.com/r0x0r/pywebview/blob/6.2.1/webview/platforms/winforms.py
+固定组件：https://github.com/r0x0r/pywebview/blob/6.2.1/webview/platforms/edgechromium.py

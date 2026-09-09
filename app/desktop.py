@@ -188,7 +188,7 @@ class DesktopService:
             except Exception as error:errors.append(str(error))
             finally:logger.removeHandler(handler)
         try:
-            # pywebview 6.0 WinForms create_file_dialog does not dispatch to STA itself.
+            # pywebview 6.2.1 WinForms create_file_dialog does not dispatch to STA itself.
             # Reuse its dialog implementation on the existing window's UI thread.
             if os.name=='nt':
                 from System import Action

@@ -33,6 +33,9 @@ def main():
             deadline=time.monotonic()+45
             while True:
                 if process.poll() is not None:raise RuntimeError('Original EXE exited before WebView initialized')
+                startup_log=app/'data'/'application.log'
+                if startup_log.is_file() and 'Desktop startup failed' in startup_log.read_text(encoding='utf-8'):
+                    raise RuntimeError('Original EXE reported a startup error; see windows-application.log')
                 try:
                     with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/version',timeout=1) as response:
                         if response.status==200:break

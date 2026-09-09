@@ -1,7 +1,7 @@
 # 升级状态（尚未通过最终Windows验收）
 
 基线：TikTokVideoMaker_GitHub_Root.zip，仓库 fd7d9fa50e02a84c051807845f275378ee218df4。
-未更换产品定位或技术栈；运行时只复用 FFmpeg/FFprobe、SQLite、pywebview。pywebview固定6.0以匹配已核查的平台实现；Playwright/pywinauto仅供开发验收，不交给用户安装。
+未更换产品定位或技术栈；运行时只复用 FFmpeg/FFprobe、SQLite、pywebview。pywebview升级并固定6.2.1，复用上游正式支持的固定WebView2运行组件能力；Playwright/pywinauto仅供开发验收，不交给用户安装。
 
 ## 已实现，等待整体交互验收
 
