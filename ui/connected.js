@@ -95,7 +95,7 @@ function batchModal(){
  <label>本次输出目录<input id="batch-output" readonly value="${esc(draft.output_dir||settings.output_dir||data.storage.output)}"><small class="note">默认使用全局输出目录；改动只影响本次及按此配置重新生成的视频。</small></label>${btn('选择目录','pick-batch-output')}
  </details><div id="batch-count" class="info-banner"></div><div id="batch-preview" class="note"></div>`,
  `<p id="batch-missing" class="missing-fields" role="status"></p>`+btn('保存为默认设置','save-production')+btn('检查预计结果','preview-batch')+btn('取消','close')+btn('创建并开始生产','submit-batch','primary',!choices.length));
- document.getElementById('batch-transitions').dataset.order=JSON.stringify(effects);
+ document.getElementById('batch-transitions').dataset.transitionOrder=JSON.stringify(effects);
  document.getElementById('batch-count-number').dataset.manual=draft.count?'true':'false';
  const songOrder=[...(draft.music_ids||settings.music_ids||[...selectedMusic])];
  document.getElementById('batch-music').dataset.songOrder=JSON.stringify(songOrder);
@@ -105,7 +105,7 @@ function batchModal(){
  document.querySelectorAll('#group-mode,#batch-count-number,#batch-timing,#batch-music').forEach(e=>e.addEventListener('change',updateBatchCount));
  document.getElementById('batch-count-number').addEventListener('input',e=>{e.target.dataset.manual='true';updateBatchCount()});
  document.getElementById('batch-timing').addEventListener('change',()=>{if(value('batch-timing')==='total'&&(value('batch-seconds')!==''||[...document.querySelectorAll('[data-duration]')].some(e=>e.value!=='')))toast('切换总时长前，请清空统一展示时间和单图时间；不会静默覆盖已填设置。')});
- document.querySelectorAll('[name=batch-transition]').forEach(e=>e.addEventListener('change',()=>{const box=document.getElementById('batch-transitions');const order=JSON.parse(box.dataset.order);const i=order.indexOf(e.value);if(i>=0)order.splice(i,1);if(e.checked)order.push(e.value);box.dataset.order=JSON.stringify(order);updateBatchCount()}));
+ document.querySelectorAll('[name=batch-transition]').forEach(e=>e.addEventListener('change',()=>{const box=document.getElementById('batch-transitions');const order=JSON.parse(box.dataset.transitionOrder);const i=order.indexOf(e.value);if(i>=0)order.splice(i,1);if(e.checked)order.push(e.value);box.dataset.transitionOrder=JSON.stringify(order);updateBatchCount()}));
  document.querySelectorAll('[name=batch-song]').forEach(e=>e.addEventListener('change',()=>{const i=songOrder.indexOf(e.value);if(i>=0)songOrder.splice(i,1);if(e.checked)songOrder.push(e.value);document.getElementById('batch-music').dataset.songOrder=JSON.stringify(songOrder);updateBatchCount()}));
  updateBatchCount();
 }
@@ -144,7 +144,7 @@ function updateBatchCount(){
  const n=value('group-mode')==='group'?(selected('batch-object').length?1:0):selected('batch-object').length;
  const count=document.getElementById('batch-count-number');if(count.dataset.manual!=='true')count.value=Math.max(1,n);
  document.getElementById('batch-count').textContent=`已选择${n}个生产对象，本批生成${Number(count.value)||0}条视频。分别生成时顺序分配数量，各对象素材独立。`;
- const order=JSON.parse(document.getElementById('batch-transitions').dataset.order||'[]');
+ const order=JSON.parse(document.getElementById('batch-transitions').dataset.transitionOrder||'[]');
  document.getElementById('batch-transition-order').textContent=order.length?'切换顺序：'+transitionSummary(order)+(order.length>1?'，按此顺序循环':'，全片统一使用'):'请至少选择一种转场效果。';
  document.getElementById('batch-total').disabled=value('batch-timing')!=='total';
  document.getElementById('batch-song-pool').hidden=!['single','multi'].includes(value('batch-music'));
@@ -163,7 +163,7 @@ function readBatch(requireObjects=true){
  if(timing==='total'&&(value('batch-seconds')!==''||Object.keys(durations).length))throw fieldError('视频总时长与已填图片展示时间冲突。请清空统一和单图时间后使用总时长，或切回按图片展示时间。','batch-seconds');
  for(const e of document.querySelectorAll('#batch-count-number,#batch-seconds,#batch-total,#batch-transition-time,#batch-volume,#batch-fade,[data-duration],[data-order]'))if(!e.disabled&&!e.checkValidity())throw fieldError('请检查“'+(e.closest('label')?.childNodes[0]?.textContent||e.getAttribute('aria-label')||'时间设置')+'”的有效范围',e.id||'batch-assets');
  const checked=selected('batch-song'),songOrder=JSON.parse(document.getElementById('batch-music').dataset.songOrder||'[]');
- return {seed:batchSeed,name:value('task-name'),objects,transitions:JSON.parse(document.getElementById('batch-transitions').dataset.order),resolution:value('batch-resolution'),fit:'contain',count:Number(value('batch-count-number')),group_mode:value('group-mode'),order:value('batch-order'),asset_order:[...document.querySelectorAll('[data-order]')].sort((a,b)=>Number(a.value)-Number(b.value)).map(e=>e.dataset.order),timing,total_duration:timing==='total'?Number(value('batch-total')):undefined,image_duration:value('batch-seconds')===''?undefined:Number(value('batch-seconds')),asset_durations:durations,overrides:{transition_duration:Number(value('batch-transition-time')),motion:value('batch-motion'),music_volume:Number(value('batch-volume'))},music:value('batch-music'),music_ids:[...new Set([...songOrder.filter(id=>checked.includes(id)),...checked])],music_order:value('batch-music-order'),music_playback:value('batch-playback'),music_fade:Number(value('batch-fade')),output_dir:value('batch-output'),local_copy:readLocalBatch(),content:readContent()};
+ return {seed:batchSeed,name:value('task-name'),objects,transitions:JSON.parse(document.getElementById('batch-transitions').dataset.transitionOrder),resolution:value('batch-resolution'),fit:'contain',count:Number(value('batch-count-number')),group_mode:value('group-mode'),order:value('batch-order'),asset_order:[...document.querySelectorAll('[data-order]')].sort((a,b)=>Number(a.value)-Number(b.value)).map(e=>e.dataset.order),timing,total_duration:timing==='total'?Number(value('batch-total')):undefined,image_duration:value('batch-seconds')===''?undefined:Number(value('batch-seconds')),asset_durations:durations,overrides:{transition_duration:Number(value('batch-transition-time')),motion:value('batch-motion'),music_volume:Number(value('batch-volume'))},music:value('batch-music'),music_ids:[...new Set([...songOrder.filter(id=>checked.includes(id)),...checked])],music_order:value('batch-music-order'),music_playback:value('batch-playback'),music_fade:Number(value('batch-fade')),output_dir:value('batch-output'),local_copy:readLocalBatch(),content:readContent()};
 }
 actions=async function(action){try{
  if(action==='reconnect'){await loadState();return}
