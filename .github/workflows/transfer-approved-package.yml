@@ -1,0 +1,200 @@
+name: Transfer the accepted package bytes
+'on':
+  push:
+    branches: ['transfer/package-10104612763']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Download the already accepted package
+        uses: actions/download-artifact@v4
+        with:
+          name: TikTokVideoMaker_Portable
+          path: incoming
+          run-id: '34353098475'
+          github-token: ${{ github.token }}
+      - name: Verify original SHA-256 and split unchanged bytes
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+          import json
+
+          source = Path("incoming/TikTokVideoMaker_Portable.zip")
+          expected = "a40fdd5cd6b8239ea0a472b6728a43daeed58183f55e7d9b251682c106aa44a0"
+          with source.open("rb") as stream:
+              digest = hashlib.file_digest(stream, "sha256").hexdigest()
+          if digest != expected:
+              raise RuntimeError(f"Original package SHA-256 mismatch: {digest}")
+
+          parts = Path("parts")
+          parts.mkdir()
+          entries = []
+          with source.open("rb") as stream:
+              while block := stream.read(32 * 1024 * 1024):
+                  name = f"part-{len(entries):02d}.bin"
+                  (parts / name).write_bytes(block)
+                  entries.append({"name": name, "size_bytes": len(block),
+                                  "sha256": hashlib.sha256(block).hexdigest()})
+          if len(entries) != 15:
+              raise RuntimeError(f"Unexpected part count: {len(entries)}")
+          manifest = {"file_name": source.name, "size_bytes": source.stat().st_size,
+                      "sha256": digest, "source_run_id": 34353098475,
+                      "source_artifact_id": 10104612763, "parts": entries}
+          (parts / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps({key: value for key, value in manifest.items() if key != "parts"}))
+          print(f"Verified original package; created {len(entries)} byte-only transport parts.")
+      - name: Transfer byte part 00
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-00
+          path: |
+            parts/part-00.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-01
+          path: |
+            parts/part-01.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-02
+          path: |
+            parts/part-02.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 03
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-03
+          path: |
+            parts/part-03.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 04
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-04
+          path: |
+            parts/part-04.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 05
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-05
+          path: |
+            parts/part-05.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 06
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-06
+          path: |
+            parts/part-06.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 07
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-07
+          path: |
+            parts/part-07.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 08
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-08
+          path: |
+            parts/part-08.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 09
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-09
+          path: |
+            parts/part-09.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-10
+          path: |
+            parts/part-10.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 11
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-11
+          path: |
+            parts/part-11.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 12
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-12
+          path: |
+            parts/part-12.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 13
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-13
+          path: |
+            parts/part-13.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Transfer byte part 14
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-part-14
+          path: |
+            parts/part-14.bin
+            parts/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
