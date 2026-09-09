@@ -1,0 +1,139 @@
+name: Audit preserved candidate fc2b24ac
+on:
+  push:
+    branches: ['audit/candidate-fc2b24ac']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package_inventory:
+    if: github.ref == 'refs/heads/audit/candidate-fc2b24ac'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Download the pinned candidate without rebuilding
+        uses: actions/download-artifact@v4
+        with:
+          name: Windows-candidate
+          path: build/candidate
+          run-id: 34368614559
+          github-token: ${{ github.token }}
+      - name: Inventory the same archive and verify every member
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/package-audit/candidate-fc2b24ac
+          python - <<'PY_AUDIT'
+          """Read-only package inventory; extraction copy preserves the original archive."""
+          from collections import defaultdict
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import stat
+          import zipfile
+          
+          ROOT = Path('build/package-audit/candidate-fc2b24ac')
+          ARCHIVE = Path('build/candidate/TikTokVideoMaker_Portable.zip')
+          DEST = ROOT / 'extracted'
+          EXPECTED = 'fc2b24ac741334fb199fc883ccb1777236330274fb87015f58e289212ed52b81'
+          
+          
+          if ARCHIVE.with_suffix('.sha256').read_text(encoding='ascii').strip() != EXPECTED:
+              raise ValueError('Candidate SHA-256 sidecar differs from pinned artifact')
+          
+          def sha256(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          
+          
+          def main():
+              digest = sha256(ARCHIVE)
+              if digest != EXPECTED:
+                  raise ValueError('Original package SHA-256 differs from accepted artifact')
+              files, paths = [], set()
+              with zipfile.ZipFile(ARCHIVE) as archive:
+                  # Validate every path before writing any package file.
+                  for item in archive.infolist():
+                      path = PurePosixPath(item.filename)
+                      if (path.is_absolute() or not path.parts or '..' in path.parts or
+                              '\\' in item.filename or ':' in item.filename or
+                              stat.S_ISLNK(item.external_attr >> 16)):
+                          raise ValueError(f'Unsafe archive path: {item.filename}')
+                      key = item.filename.rstrip('/').casefold()
+                      if key in paths:
+                          raise ValueError(f'Duplicate archive path: {item.filename}')
+                      paths.add(key)
+                  for item in archive.infolist():
+                      target = DEST / item.filename
+                      if item.is_dir():
+                          target.mkdir(parents=True, exist_ok=True)
+                          continue
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      digest_file = hashlib.sha256()
+                      size = 0
+                      with archive.open(item) as source, target.open('wb') as out:
+                          while block := source.read(1024 * 1024):
+                              out.write(block)
+                              digest_file.update(block)
+                              size += len(block)
+                      if size != item.file_size:
+                          raise ValueError(f'Extracted size mismatch: {item.filename}')
+                      files.append({'path': item.filename, 'bytes': size,
+                                    'compressed_bytes': item.compress_size,
+                                    'sha256': digest_file.hexdigest(),
+                                    'compression_method': item.compress_type})
+              directories = defaultdict(lambda: {'bytes': 0, 'compressed_bytes': 0, 'files': 0})
+              by_hash = defaultdict(list)
+              for entry in files:
+                  for parent in PurePosixPath(entry['path']).parents:
+                      if str(parent) != '.':
+                          count = directories[str(parent)]
+                          count['bytes'] += entry['bytes']
+                          count['compressed_bytes'] += entry['compressed_bytes']
+                          count['files'] += 1
+                  by_hash[(entry['bytes'], entry['sha256'])].append(entry['path'])
+              dirs = [{'path': path, **data} for path, data in directories.items()]
+              duplicates = [{'bytes_each': size, 'sha256': digest, 'paths': names,
+                             'redundant_bytes': size * (len(names) - 1)}
+                            for (size, digest), names in by_hash.items() if len(names) > 1]
+              root_files = [f for f in files if len(PurePosixPath(f['path']).parts) == 2]
+              result = {
+                  'archive': str(ARCHIVE), 'archive_bytes': ARCHIVE.stat().st_size,
+                  'archive_sha256': digest, 'expected_archive_sha256': EXPECTED,
+                  'extraction_directory': str(DEST), 'files': files,
+                  'file_count': len(files), 'directory_count': len(dirs),
+                  'uncompressed_bytes': sum(f['bytes'] for f in files),
+                  'compressed_file_payload_bytes': sum(f['compressed_bytes'] for f in files),
+                  'top_level_directories': sorted(
+                      (d for d in dirs if len(PurePosixPath(d['path']).parts) == 2),
+                      key=lambda d: d['bytes'], reverse=True),
+                  'root_files_bytes': sum(f['bytes'] for f in root_files),
+                  'root_files': root_files,
+                  'largest_20_files': sorted(files, key=lambda f: f['bytes'], reverse=True)[:20],
+                  'largest_20_directories': sorted(dirs, key=lambda d: d['bytes'], reverse=True)[:20],
+                  'all_directories': sorted(dirs, key=lambda d: d['bytes'], reverse=True),
+                  'duplicate_groups': sorted(duplicates, key=lambda d: d['redundant_bytes'], reverse=True),
+                  'duplicates_redundant_bytes_not_safe_deletion_estimate': sum(d['redundant_bytes'] for d in duplicates),
+                  'checks': {'all_archive_paths_safe': True, 'all_zip_member_crcs_read': True,
+                             'all_extracted_sizes_match': True, 'archive_sha_matches_accepted': True,
+                             'executables_run': False},
+              }
+              (ROOT / 'current-audit.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+              print(json.dumps({key: result[key] for key in ('archive_bytes', 'archive_sha256', 'uncompressed_bytes',
+                               'file_count', 'directory_count', 'top_level_directories',
+                               'duplicates_redundant_bytes_not_safe_deletion_estimate')}, ensure_ascii=False, indent=2))
+          
+          
+          if __name__ == '__main__':
+              main()
+          PY_AUDIT
+      - name: Save the small package inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-fc2b24ac-package-inventory
+          path: build/package-audit/candidate-fc2b24ac/current-audit.json
+          if-no-files-found: error
+          retention-days: 30
