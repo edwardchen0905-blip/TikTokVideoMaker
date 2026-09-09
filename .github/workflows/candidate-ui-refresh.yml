@@ -1,0 +1,108 @@
+name: Verify UI refresh on the preserved Windows executable
+on:
+  push:
+    branches: [validation/ui-refresh-fc2b24ac]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  business:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare test-only tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install Pillow
+          npm install --no-save playwright@1.58.2
+          npx playwright install --with-deps chromium
+      - name: Check affected controls and candidate replacement safeguards
+        run: |
+          set -o pipefail
+          mkdir -p build/evidence
+          node tests/check_ui.cjs 2>&1 | tee build/evidence/ui-controls.log
+          python -m unittest discover -s tests -p test_replace_candidate_ui.py -v 2>&1 | tee build/evidence/resource-replacement-tests.log
+      - name: Real UI and actual production before creating the replacement ZIP
+        run: |
+          set -o pipefail
+          mkdir -p build/evidence
+          node tests/ui_business.cjs 2>&1 | tee build/evidence/ui-business.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Linux-business-evidence
+          path: build/evidence
+          if-no-files-found: ignore
+  windows:
+    needs: business
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      TVM_CAPTURE_ONLY: '0'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare acceptance tools only
+        run: |
+          python -m pip install pywinauto Pillow
+          if ($LASTEXITCODE -ne 0) { throw 'Native acceptance dependency installation failed' }
+          npm install --no-save playwright@1.58.2
+          if ($LASTEXITCODE -ne 0) { throw 'UI test dependency installation failed' }
+      - name: Download the locked original candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: Windows-candidate
+          path: build/base-candidate
+          run-id: 34368614559
+          github-token: ${{ github.token }}
+      - name: Replace only the external UI resource and verify every archived member
+        run: |
+          New-Item -ItemType Directory -Force build/evidence | Out-Null
+          python tests/replace_candidate_ui.py --source-commit $env:GITHUB_SHA 2>&1 | Tee-Object build/evidence/candidate-resource-update.log
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate resource verification failed' }
+      - name: Preserve the replacement ZIP and SHA-256 before opening its EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-candidate
+          path: |
+            dist/TikTokVideoMaker_Portable.zip
+            dist/TikTokVideoMaker_Portable.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Verify EXE, native dialogs, actual production, normal exit and recovery
+        run: |
+          python tests/windows_acceptance.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows acceptance failed' }
+      - name: Preserve the accepted ZIP without any further build or repack
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TikTokVideoMaker_Portable
+          path: dist/TikTokVideoMaker_Portable.zip
+          if-no-files-found: error
+          compression-level: 0
+      - name: Preserve all Windows evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-build-evidence
+          path: build/evidence
+          if-no-files-found: ignore

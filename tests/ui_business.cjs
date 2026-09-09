@@ -187,6 +187,8 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   const originalVideo=s.videos[0],originalTask=s.tasks.find(t=>t.id===originalVideo.task_id),originalHash=fileHash(originalVideo.path);
   const existingVideos=new Set(s.videos.map(v=>v.id));
   await click('regenerate:'+originalVideo.id);s=await waitFor(s=>s.videos.length===3,'regenerated video');
+  // No reload, navigation or import may supply the UI's missing background update.
+  await page.getByRole('tab',{name:/^全部视频\s*\(3\)$/}).waitFor();
   const regenerated=s.videos.find(v=>!existingVideos.has(v.id));assert.ok(regenerated);
   const regeneratedTask=s.tasks.find(t=>t.id===regenerated.task_id);
   for(const key of ['config','assets','template','product_id','sku_id'])assert.deepEqual(regeneratedTask[key],originalTask[key],`regenerated ${key}`);
@@ -228,6 +230,23 @@ function childResult(child){return new Promise((resolve,reject)=>{let text='';ch
   assert.deepEqual(JSON.parse(productTask.config).transition_sequence,['fade','fade','fade','fade']);
   assert.equal(JSON.parse(productTask.config).resolution,'1920x1080');
   recordStage('product-video-produced',{task:productTask.id});
+  // Verify the live page before CSV import or any other action that explicitly reloads state.
+  await page.locator('#navigation a[href="#videos"]').click();
+  await page.waitForFunction(()=>document.querySelector('#page video')?.readyState>=2);
+  const preservedPreview=await page.locator('#page video').elementHandle();
+  await preservedPreview.evaluate(v=>{v.pause();v.currentTime=.5;v.volume=.35});
+  const refreshStarted=Date.now();
+  await page.waitForResponse(r=>r.url().endsWith('/api/state')&&r.request().timing().startTime>=refreshStarted);
+  await page.getByRole('tab',{name:/^全部视频\s*\(5\)$/}).waitFor();
+  assert.equal(await preservedPreview.evaluate(v=>v===document.querySelector('#page video')&&v.paused&&Math.abs(v.currentTime-.5)<.05&&Math.abs(v.volume-.35)<.01),true);
+  // The same render wrapper also serves explicit selection and loadState callers.
+  await preservedPreview.evaluate(v=>{v.currentTime=0;return v.play()});
+  await page.waitForFunction(()=>document.querySelector('#page video')?.currentTime>0);
+  const positionBefore=await preservedPreview.evaluate(v=>v.currentTime);
+  await click('focus-video:'+originalVideo.id);
+  assert.equal(await preservedPreview.evaluate((v,position)=>v===document.querySelector('#page video')&&!v.paused&&v.currentTime>=position&&Math.abs(v.volume-.35)<.01,positionBefore),true);
+  await preservedPreview.evaluate(v=>v.pause());
+  recordStage('live-video-list-refreshed',{videos:5,same_preview_node:true,pause_play_position_volume_preserved:true});
   // Every advertised effect previews a real renderer output through the application's UI.
   assert.equal(await page.locator('#navigation a[href="#templates"]').count(),0);
   await page.locator('#navigation a[href="#home"]').click();

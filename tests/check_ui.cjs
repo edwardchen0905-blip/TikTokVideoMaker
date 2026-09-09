@@ -30,7 +30,7 @@ vm.runInContext(fs.readFileSync(path.join(root,'ui/connected.js'),'utf8'),contex
   const actual=JSON.parse(JSON.stringify(observations[0]));
   check(open?'active batch preview':'closed batch leaves page preview active',actual,{name:'transition-preview',payload:{transition:'none',resolution:open?'1920x1080':'1080x1920',transition_duration:open?.1:.3},dialogOpen:true,batchTarget:open?'<p>正在准备实际效果预览…</p>':'',pageTarget:open?'':'<p>正在准备实际效果预览…</p>'});
  }
- for(const [name,open,visibleVideo,retainedVideo,expected] of [['closed dialog video must not block refresh',false,false,true,['state']],['visible page video protects playback',false,true,true,[]],['open dialog protects editing',true,false,true,[]]]){
+ for(const [name,open,visibleVideo,retainedVideo,expected] of [['closed dialog video must not block refresh',false,false,true,['state']],['visible page video must not block state refresh',false,true,true,['state']],['open dialog protects editing',true,false,true,[]]]){
   node('dialog').open=open;pageVideo=visibleVideo;retainedDialogVideo=retainedVideo;observations.length=0;
   vm.runInContext("route='tasks';online=true",context);await timers[0]();
   check(name,observations.map(o=>o.name),expected);
